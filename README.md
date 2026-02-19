@@ -2,91 +2,104 @@
 
 Monorepo foundation for the project described in `PDR.md`.
 
-## Repository layout
+## Архитектура
 
-- `apps/bot` - Telegram bot service (aiogram)
-- `services/orchestrator` - LangGraph orchestration service
-- `libs/common` - shared settings and core utilities
+Проект разделен на 3 слоя:
 
-## Quick start
+- `apps/bot` - Telegram bot (aiogram), принимает пользователя, язык и код.
+- `services/orchestrator` - оркестрация pipeline проверки решения (sandbox, тесты, analysis, scoring).
+- `libs/common` - общие настройки и загрузка env.
 
-1. Create virtual environment and install dependencies (prefers `uv`, has pip fallback):
+Поток данных:
+
+1. Пользователь отправляет код в Telegram.
+2. Bot сохраняет submission в БД.
+3. Orchestrator прогоняет graph steps:
+   `GenerateTask -> ExecuteSandbox -> RunTests -> StaticAnalysis -> LLMReview -> ScoreAggregation -> UpdateProfile`.
+4. Результаты (метрики, статанализ, score) сохраняются и используются для профиля пользователя.
+
+## Краткое описание модулей
+
+### Bot (`apps/bot/src/interview_bot`)
+
+- `main.py` - aiogram handlers (`/start`, выбор языка, валидация и прием submission).
+- `user_repository.py` - слой доступа к БД (SQLite/Postgres), миграции, CRUD для пользователей, задач, submissions, metrics, static analysis.
+
+### Orchestrator (`services/orchestrator/src/interview_orchestrator`)
+
+- `agent_state.py` - единый `TypedDict` state + runtime-валидация полей.
+- `state_steps.py` - graph nodes и полный цикл `run_full_graph_cycle`.
+- `sandbox_runner.py` - безопасный запуск кода в Docker (CPU/RAM/time limits, no network, cleanup).
+- `test_runner.py` - запуск predefined JSON test cases, pass/fail и отчет по первому упавшему тесту.
+- `static_analysis.py` - Python static analysis через `pylint`, `radon`, `bandit`.
+- `main.py` - bootstrap entrypoint сервиса orchestrator.
+
+### Common (`libs/common/src/interview_common`)
+
+- `settings.py` - загрузка `.env` и `Settings` (`APP_ENV`, `LOG_LEVEL`, `DATABASE_URL`, `BOT_TOKEN`, `LLM_API_KEY`).
+
+### Sandbox templates (`sandbox`)
+
+- `sandbox/python`, `sandbox/go`, `sandbox/java`, `sandbox/cpp` - Dockerfile + `run.sh` для изолированного выполнения по языкам.
+
+## Краткий гайд запуска
+
+### 1. Установка зависимостей
 
 ```bash
 make install
 ```
 
-If internet is unavailable, `make install` still creates an offline local source-link setup for running services.
+`make install` использует `uv` (если доступен) и fallback на `pip`.
 
-2. Copy env template and set secrets:
+### 2. Настройка окружения
 
 ```bash
 cp .env.example .env
 ```
 
-3. Run local checks:
+Минимально для локального старта без Postgres можно поставить SQLite:
+
+```env
+DATABASE_URL=sqlite:///tmp/bot.db
+BOT_TOKEN=<your_telegram_bot_token>
+```
+
+### 3. Проверка проекта
+
+```bash
+make test
+```
+
+Если установлены линтеры/тайпчекер:
 
 ```bash
 make ci
 ```
 
-4. Run service bootstrap commands:
+### 4. Запуск сервисов
 
 ```bash
 make run-orchestrator
 make run-bot
 ```
 
+### 5. (Опционально) Сборка sandbox образов
+
+См. `sandbox/README.md` для команд `docker build` по языкам и примеров запуска.
+
 ## Tooling
 
-- Dependency + workspace management: `uv`
-- Formatting/Linting/Types: `black`, `ruff`, `mypy`
-- Git hooks: `pre-commit`
-
-## Sandbox Templates
-
-Language-specific Docker sandbox templates are available in:
-
-- `sandbox/python`
-- `sandbox/go`
-- `sandbox/java`
-- `sandbox/cpp`
-
-See `sandbox/README.md` for build and execution examples.
-
-Secure execution wrapper (CPU/RAM limits, timeout, no-network, auto-cleanup):
-
-- `services/orchestrator/src/interview_orchestrator/sandbox_runner.py`
-- Execution metrics storage (runtime/memory/exit/stdout/stderr):
-  - schema + repository methods in `apps/bot/src/interview_bot/user_repository.py`
-- Predefined test runner (JSON test cases + pass/fail aggregation):
-  - `services/orchestrator/src/interview_orchestrator/test_runner.py`
-  - includes first-failed-case capture and diff-based failure report for user-facing feedback
-- Python static analysis layer (`pylint` + `radon` + `bandit`):
-  - `services/orchestrator/src/interview_orchestrator/static_analysis.py`
-  - complexity score + security warnings persistence in bot DB:
-    - `apps/bot/src/interview_bot/user_repository.py` (`submission_static_analysis`)
-- Unified LangGraph-style agent state (`TypedDict` + validation + step adapters):
-  - `services/orchestrator/src/interview_orchestrator/agent_state.py`
-  - `services/orchestrator/src/interview_orchestrator/state_steps.py`
+- Workspace/deps: `uv`
+- Lint/format/types: `ruff`, `black`, `mypy`
+- Hooks: `pre-commit`
 
 ## CI/CD
 
 - Workflow: `.github/workflows/ci.yml`
-- Jobs:
-  - `lint-and-typecheck`
-  - `unit-tests`
-  - `docker-build` matrix for:
-    - `bot`
-    - `orchestrator`
-    - `sandbox-python`
-    - `sandbox-go`
-    - `sandbox-java`
-    - `sandbox-cpp`
-  - `required-ci` (aggregated gate check)
-
-To enforce `DoD` ("PR не мержится без прохождения CI"), enable branch protection for `main` and set `required-ci` as required status check.
+- Проверки: lint/typecheck, unit tests, docker build matrix
+- Gate job: `required-ci`
 
 ## Python version
 
-- Supported runtime: Python `3.11+` (tested config allows `3.11` - `3.13`)
+- Python `3.11+` (текущий конфиг: `>=3.11,<3.14`)
