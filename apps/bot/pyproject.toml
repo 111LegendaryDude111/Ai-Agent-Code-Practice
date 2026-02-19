@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "interview-bot"
+version = "0.1.0"
+description = "Telegram bot service for interview assistant"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "aiogram>=3.15.0,<4.0.0",
+    "interview-common>=0.1.0",
+]
+
+[project.scripts]
+interview-bot = "interview_bot.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+interview-common = { workspace = true }

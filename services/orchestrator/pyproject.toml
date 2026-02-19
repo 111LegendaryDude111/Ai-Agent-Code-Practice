@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "interview-orchestrator"
+version = "0.1.0"
+description = "LangGraph orchestrator service"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "interview-common>=0.1.0",
+    "langchain>=0.3.20,<0.4.0",
+    "langgraph>=0.2.0,<0.3.0",
+]
+
+[project.scripts]
+interview-orchestrator = "interview_orchestrator.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+interview-common = { workspace = true }
