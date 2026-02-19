@@ -78,6 +78,14 @@ jobs:
             dockerfile: docker/bot.Dockerfile
           - service: orchestrator
             dockerfile: docker/orchestrator.Dockerfile
+          - service: sandbox-python
+            dockerfile: sandbox/python/Dockerfile
+          - service: sandbox-go
+            dockerfile: sandbox/go/Dockerfile
+          - service: sandbox-java
+            dockerfile: sandbox/java/Dockerfile
+          - service: sandbox-cpp
+            dockerfile: sandbox/cpp/Dockerfile
 
     steps:
       - name: Checkout

@@ -43,13 +43,36 @@ make run-bot
 - Formatting/Linting/Types: `black`, `ruff`, `mypy`
 - Git hooks: `pre-commit`
 
+## Sandbox Templates
+
+Language-specific Docker sandbox templates are available in:
+
+- `sandbox/python`
+- `sandbox/go`
+- `sandbox/java`
+- `sandbox/cpp`
+
+See `sandbox/README.md` for build and execution examples.
+
+Secure execution wrapper (CPU/RAM limits, timeout, no-network, auto-cleanup):
+
+- `services/orchestrator/src/interview_orchestrator/sandbox_runner.py`
+- Execution metrics storage (runtime/memory/exit/stdout/stderr):
+  - schema + repository methods in `apps/bot/src/interview_bot/user_repository.py`
+
 ## CI/CD
 
 - Workflow: `.github/workflows/ci.yml`
 - Jobs:
   - `lint-and-typecheck`
   - `unit-tests`
-  - `docker-build (bot)` and `docker-build (orchestrator)`
+  - `docker-build` matrix for:
+    - `bot`
+    - `orchestrator`
+    - `sandbox-python`
+    - `sandbox-go`
+    - `sandbox-java`
+    - `sandbox-cpp`
   - `required-ci` (aggregated gate check)
 
 To enforce `DoD` ("PR не мержится без прохождения CI"), enable branch protection for `main` and set `required-ci` as required status check.
