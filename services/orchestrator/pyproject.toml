@@ -8,9 +8,12 @@ version = "0.1.0"
 description = "LangGraph orchestrator service"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "bandit>=1.8.0,<2.0.0",
     "interview-common>=0.1.0",
     "langchain>=0.3.20,<0.4.0",
     "langgraph>=0.2.0,<0.3.0",
+    "pylint>=3.3.0,<4.0.0",
+    "radon>=6.0.1,<7.0.0",
 ]
 
 [project.scripts]

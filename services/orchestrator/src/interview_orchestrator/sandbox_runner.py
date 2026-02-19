@@ -64,6 +64,7 @@ class DockerSandboxRunner:
         source_code: str,
         limits: SandboxLimits | None = None,
         main_class_name: str = "Main",
+        stdin_data: str = "",
     ) -> SandboxExecutionResult:
         if language not in DEFAULT_SOURCE_FILE_BY_LANGUAGE:
             raise ValueError(
@@ -96,6 +97,7 @@ class DockerSandboxRunner:
                     command,
                     capture_output=True,
                     text=True,
+                    input=stdin_data,
                     timeout=normalized_limits.timeout_seconds,
                     check=False,
                 )

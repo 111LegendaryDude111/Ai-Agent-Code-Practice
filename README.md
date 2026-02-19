@@ -59,6 +59,16 @@ Secure execution wrapper (CPU/RAM limits, timeout, no-network, auto-cleanup):
 - `services/orchestrator/src/interview_orchestrator/sandbox_runner.py`
 - Execution metrics storage (runtime/memory/exit/stdout/stderr):
   - schema + repository methods in `apps/bot/src/interview_bot/user_repository.py`
+- Predefined test runner (JSON test cases + pass/fail aggregation):
+  - `services/orchestrator/src/interview_orchestrator/test_runner.py`
+  - includes first-failed-case capture and diff-based failure report for user-facing feedback
+- Python static analysis layer (`pylint` + `radon` + `bandit`):
+  - `services/orchestrator/src/interview_orchestrator/static_analysis.py`
+  - complexity score + security warnings persistence in bot DB:
+    - `apps/bot/src/interview_bot/user_repository.py` (`submission_static_analysis`)
+- Unified LangGraph-style agent state (`TypedDict` + validation + step adapters):
+  - `services/orchestrator/src/interview_orchestrator/agent_state.py`
+  - `services/orchestrator/src/interview_orchestrator/state_steps.py`
 
 ## CI/CD
 

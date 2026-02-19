@@ -208,6 +208,88 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_saved)
         self.assertIsNone(metrics)
 
+    async def test_save_submission_static_analysis_persists_complexity_and_security_warnings(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            database_path = Path(tmp_dir) / "bot.db"
+            repository = SQLiteUserRepository(str(database_path))
+
+            await repository.ensure_schema()
+            await repository.register_user(telegram_id=1001)
+            await repository.set_preferred_language(
+                telegram_id=1001,
+                preferred_language="python",
+            )
+            submission_id = await repository.save_submission_with_id(
+                telegram_id=1001,
+                code="print('analysis')",
+            )
+
+            self.assertIsNotNone(submission_id)
+            if submission_id is None:
+                self.fail("Expected saved submission id.")
+
+            is_saved = await repository.save_submission_static_analysis(
+                submission_id=submission_id,
+                language="python",
+                pylint_score=8.75,
+                complexity_score=3.5,
+                security_warnings=[
+                    {
+                        "test_id": "B101",
+                        "issue_severity": "LOW",
+                        "line_number": 2,
+                        "issue_text": "Use of assert detected.",
+                    }
+                ],
+                pylint_warnings=[
+                    {
+                        "message_id": "C0114",
+                        "line": 1,
+                        "message": "Missing module docstring",
+                    }
+                ],
+            )
+            analysis = await repository.get_submission_static_analysis(submission_id)
+
+        self.assertTrue(is_saved)
+        self.assertIsNotNone(analysis)
+        if analysis is None:
+            self.fail("Expected static analysis row.")
+        self.assertEqual(analysis.language, "python")
+        self.assertEqual(analysis.pylint_score, 8.75)
+        self.assertEqual(analysis.complexity_score, 3.5)
+        self.assertEqual(len(analysis.security_warnings), 1)
+        self.assertEqual(
+            analysis.security_warnings[0].get("test_id"),
+            "B101",
+        )
+        self.assertEqual(len(analysis.pylint_warnings), 1)
+        self.assertEqual(
+            analysis.pylint_warnings[0].get("message_id"),
+            "C0114",
+        )
+
+    async def test_save_submission_static_analysis_requires_existing_submission(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            database_path = Path(tmp_dir) / "bot.db"
+            repository = SQLiteUserRepository(str(database_path))
+
+            await repository.ensure_schema()
+            is_saved = await repository.save_submission_static_analysis(
+                submission_id=404,
+                language="python",
+                pylint_score=7.1,
+                complexity_score=2.0,
+                security_warnings=[],
+                pylint_warnings=[],
+            )
+            analysis = await repository.get_submission_static_analysis(404)
+
+        self.assertFalse(is_saved)
+        self.assertIsNone(analysis)
+
     async def test_ensure_schema_migrates_existing_users_table(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             database_path = Path(tmp_dir) / "bot.db"
@@ -252,7 +334,12 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     (7,),
                 ).fetchone()
                 metrics_table_exists = connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'submission_metrics';"
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'submission_metrics';"
+                ).fetchone()
+                static_analysis_table_exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'submission_static_analysis';"
                 ).fetchone()
 
         user_count = row[0] if row is not None else 0
@@ -262,8 +349,9 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task_id", task_columns)
         self.assertIsNotNone(task_table_exists)
         self.assertIsNotNone(metrics_table_exists)
+        self.assertIsNotNone(static_analysis_table_exists)
         self.assertEqual(user_count, 1)
-        self.assertGreaterEqual(migration_count, 8)
+        self.assertGreaterEqual(migration_count, 9)
         self.assertIsNotNone(skill_profile_row)
         if skill_profile_row is None:
             self.fail("Expected migrated skill profile value.")
@@ -346,6 +434,7 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 "0006_create_indexes",
                 "0007_add_skill_profile",
                 "0008_create_submission_metrics",
+                "0009_create_submission_static_analysis",
             },
         )
         self.assertIn("idx_users_created_at", index_names)
@@ -355,6 +444,8 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("idx_submissions_task_created_at", index_names)
         self.assertIn("idx_submission_metrics_submission_id", index_names)
         self.assertIn("idx_submission_metrics_created_at", index_names)
+        self.assertIn("idx_submission_static_analysis_submission_id", index_names)
+        self.assertIn("idx_submission_static_analysis_created_at", index_names)
 
     def test_build_repository_from_sqlite_url(self) -> None:
         repository = build_user_repository("sqlite:///:memory:")

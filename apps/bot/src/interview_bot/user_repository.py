@@ -32,6 +32,17 @@ class SubmissionMetricsRecord:
     created_at: str
 
 
+@dataclass(frozen=True)
+class SubmissionStaticAnalysisRecord:
+    submission_id: int
+    language: str
+    pylint_score: float | None
+    complexity_score: float | None
+    security_warnings: list[dict[str, object]]
+    pylint_warnings: list[dict[str, object]]
+    created_at: str
+
+
 DEFAULT_SKILL_PROFILE: dict[str, object] = {
     "version": 1,
     "language_scores": {},
@@ -284,6 +295,51 @@ FROM submission_metrics
 WHERE submission_id = ?;
 """
 
+CREATE_SUBMISSION_STATIC_ANALYSIS_TABLE_SQLITE_SQL = """
+CREATE TABLE IF NOT EXISTS submission_static_analysis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    submission_id INTEGER NOT NULL UNIQUE,
+    language TEXT NOT NULL,
+    pylint_score REAL,
+    complexity_score REAL,
+    security_warnings TEXT NOT NULL DEFAULT '[]',
+    pylint_warnings TEXT NOT NULL DEFAULT '[]',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (submission_id) REFERENCES submissions(id) ON DELETE CASCADE
+);
+"""
+
+INSERT_SUBMISSION_STATIC_ANALYSIS_SQLITE_SQL = """
+INSERT INTO submission_static_analysis (
+    submission_id,
+    language,
+    pylint_score,
+    complexity_score,
+    security_warnings,
+    pylint_warnings
+)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(submission_id) DO UPDATE SET
+    language = excluded.language,
+    pylint_score = excluded.pylint_score,
+    complexity_score = excluded.complexity_score,
+    security_warnings = excluded.security_warnings,
+    pylint_warnings = excluded.pylint_warnings;
+"""
+
+SELECT_SUBMISSION_STATIC_ANALYSIS_SQLITE_SQL = """
+SELECT
+    submission_id,
+    language,
+    pylint_score,
+    complexity_score,
+    security_warnings,
+    pylint_warnings,
+    created_at
+FROM submission_static_analysis
+WHERE submission_id = ?;
+"""
+
 CREATE_SUBMISSIONS_TABLE_POSTGRES_SQL = """
 CREATE TABLE IF NOT EXISTS submissions (
     id BIGSERIAL PRIMARY KEY,
@@ -341,6 +397,50 @@ FROM submission_metrics
 WHERE submission_id = %s;
 """
 
+CREATE_SUBMISSION_STATIC_ANALYSIS_TABLE_POSTGRES_SQL = """
+CREATE TABLE IF NOT EXISTS submission_static_analysis (
+    id BIGSERIAL PRIMARY KEY,
+    submission_id BIGINT NOT NULL UNIQUE REFERENCES submissions(id) ON DELETE CASCADE,
+    language TEXT NOT NULL,
+    pylint_score DOUBLE PRECISION,
+    complexity_score DOUBLE PRECISION,
+    security_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    pylint_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+INSERT_SUBMISSION_STATIC_ANALYSIS_POSTGRES_SQL = """
+INSERT INTO submission_static_analysis (
+    submission_id,
+    language,
+    pylint_score,
+    complexity_score,
+    security_warnings,
+    pylint_warnings
+)
+VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb)
+ON CONFLICT (submission_id) DO UPDATE SET
+    language = EXCLUDED.language,
+    pylint_score = EXCLUDED.pylint_score,
+    complexity_score = EXCLUDED.complexity_score,
+    security_warnings = EXCLUDED.security_warnings,
+    pylint_warnings = EXCLUDED.pylint_warnings;
+"""
+
+SELECT_SUBMISSION_STATIC_ANALYSIS_POSTGRES_SQL = """
+SELECT
+    submission_id,
+    language,
+    pylint_score,
+    complexity_score,
+    security_warnings::text,
+    pylint_warnings::text,
+    created_at
+FROM submission_static_analysis
+WHERE submission_id = %s;
+"""
+
 ALTER_SUBMISSIONS_TABLE_POSTGRES_ADD_TASK_ID_SQL = """
 ALTER TABLE submissions
 ADD COLUMN IF NOT EXISTS task_id BIGINT;
@@ -384,6 +484,16 @@ ON submission_metrics(submission_id);
 CREATE_SUBMISSION_METRICS_CREATED_AT_INDEX_SQLITE_SQL = """
 CREATE INDEX IF NOT EXISTS idx_submission_metrics_created_at
 ON submission_metrics(created_at);
+"""
+
+CREATE_SUBMISSION_STATIC_ANALYSIS_SUBMISSION_ID_INDEX_SQLITE_SQL = """
+CREATE INDEX IF NOT EXISTS idx_submission_static_analysis_submission_id
+ON submission_static_analysis(submission_id);
+"""
+
+CREATE_SUBMISSION_STATIC_ANALYSIS_CREATED_AT_INDEX_SQLITE_SQL = """
+CREATE INDEX IF NOT EXISTS idx_submission_static_analysis_created_at
+ON submission_static_analysis(created_at);
 """
 
 CREATE_TASKS_TABLE_POSTGRES_SQL = """
@@ -495,6 +605,16 @@ CREATE INDEX IF NOT EXISTS idx_submission_metrics_created_at
 ON submission_metrics(created_at);
 """
 
+CREATE_SUBMISSION_STATIC_ANALYSIS_SUBMISSION_ID_INDEX_POSTGRES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_submission_static_analysis_submission_id
+ON submission_static_analysis(submission_id);
+"""
+
+CREATE_SUBMISSION_STATIC_ANALYSIS_CREATED_AT_INDEX_POSTGRES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_submission_static_analysis_created_at
+ON submission_static_analysis(created_at);
+"""
+
 SELECT_PREFERRED_LANGUAGE_POSTGRES_SQL = """
 SELECT preferred_language
 FROM users
@@ -567,6 +687,23 @@ class UserRepository(Protocol):
         ...
 
     async def get_submission_metrics(self, submission_id: int) -> SubmissionMetricsRecord | None:
+        ...
+
+    async def save_submission_static_analysis(
+        self,
+        submission_id: int,
+        language: str,
+        pylint_score: float | None,
+        complexity_score: float | None,
+        security_warnings: list[dict[str, object]],
+        pylint_warnings: list[dict[str, object]],
+    ) -> bool:
+        ...
+
+    async def get_submission_static_analysis(
+        self,
+        submission_id: int,
+    ) -> SubmissionStaticAnalysisRecord | None:
         ...
 
     async def create_task(
@@ -668,6 +805,31 @@ class SQLiteUserRepository:
     async def get_submission_metrics(self, submission_id: int) -> SubmissionMetricsRecord | None:
         return await asyncio.to_thread(self._get_submission_metrics_sync, submission_id)
 
+    async def save_submission_static_analysis(
+        self,
+        submission_id: int,
+        language: str,
+        pylint_score: float | None,
+        complexity_score: float | None,
+        security_warnings: list[dict[str, object]],
+        pylint_warnings: list[dict[str, object]],
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._save_submission_static_analysis_sync,
+            submission_id,
+            language,
+            pylint_score,
+            complexity_score,
+            security_warnings,
+            pylint_warnings,
+        )
+
+    async def get_submission_static_analysis(
+        self,
+        submission_id: int,
+    ) -> SubmissionStaticAnalysisRecord | None:
+        return await asyncio.to_thread(self._get_submission_static_analysis_sync, submission_id)
+
     async def create_task(
         self,
         language: str,
@@ -765,6 +927,18 @@ class SQLiteUserRepository:
                 connection.execute(CREATE_SUBMISSION_METRICS_SUBMISSION_ID_INDEX_SQLITE_SQL)
                 connection.execute(CREATE_SUBMISSION_METRICS_CREATED_AT_INDEX_SQLITE_SQL)
                 self._mark_sqlite_migration_applied(connection, "0008_create_submission_metrics")
+
+            if not self._is_sqlite_migration_applied(
+                connection,
+                "0009_create_submission_static_analysis",
+            ):
+                connection.execute(CREATE_SUBMISSION_STATIC_ANALYSIS_TABLE_SQLITE_SQL)
+                connection.execute(CREATE_SUBMISSION_STATIC_ANALYSIS_SUBMISSION_ID_INDEX_SQLITE_SQL)
+                connection.execute(CREATE_SUBMISSION_STATIC_ANALYSIS_CREATED_AT_INDEX_SQLITE_SQL)
+                self._mark_sqlite_migration_applied(
+                    connection,
+                    "0009_create_submission_static_analysis",
+                )
 
             connection.execute(
                 BOOTSTRAP_USERS_SKILL_PROFILE_SQLITE_SQL,
@@ -898,6 +1072,53 @@ class SQLiteUserRepository:
 
         return _row_to_submission_metrics(tuple(row))
 
+    def _save_submission_static_analysis_sync(
+        self,
+        submission_id: int,
+        language: str,
+        pylint_score: float | None,
+        complexity_score: float | None,
+        security_warnings: list[dict[str, object]],
+        pylint_warnings: list[dict[str, object]],
+    ) -> bool:
+        with closing(sqlite3.connect(self._database_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON;")
+            submission = connection.execute(
+                SELECT_SUBMISSION_EXISTS_SQLITE_SQL,
+                (submission_id,),
+            ).fetchone()
+            if submission is None:
+                return False
+
+            cursor = connection.execute(
+                INSERT_SUBMISSION_STATIC_ANALYSIS_SQLITE_SQL,
+                (
+                    submission_id,
+                    language,
+                    pylint_score,
+                    complexity_score,
+                    _encode_json_payload(security_warnings),
+                    _encode_json_payload(pylint_warnings),
+                ),
+            )
+            connection.commit()
+        return cursor.rowcount >= 1
+
+    def _get_submission_static_analysis_sync(
+        self,
+        submission_id: int,
+    ) -> SubmissionStaticAnalysisRecord | None:
+        with closing(sqlite3.connect(self._database_path)) as connection:
+            row = connection.execute(
+                SELECT_SUBMISSION_STATIC_ANALYSIS_SQLITE_SQL,
+                (submission_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return _row_to_submission_static_analysis(tuple(row))
+
     def _create_task_sync(
         self,
         language: str,
@@ -987,12 +1208,18 @@ class PostgresUserRepository:
     async def ensure_schema(self) -> None:
         await self._execute(CREATE_SCHEMA_MIGRATIONS_TABLE_POSTGRES_SQL)
 
-        await self._apply_postgres_migration("0001_create_users", (CREATE_USERS_TABLE_POSTGRES_SQL,))
+        await self._apply_postgres_migration(
+            "0001_create_users",
+            (CREATE_USERS_TABLE_POSTGRES_SQL,),
+        )
         await self._apply_postgres_migration(
             "0002_add_preferred_language",
             (ALTER_USERS_TABLE_POSTGRES_SQL,),
         )
-        await self._apply_postgres_migration("0003_create_tasks", (CREATE_TASKS_TABLE_POSTGRES_SQL,))
+        await self._apply_postgres_migration(
+            "0003_create_tasks",
+            (CREATE_TASKS_TABLE_POSTGRES_SQL,),
+        )
         await self._apply_postgres_migration(
             "0004_create_submissions",
             (CREATE_SUBMISSIONS_TABLE_POSTGRES_SQL,),
@@ -1026,6 +1253,14 @@ class PostgresUserRepository:
                 CREATE_SUBMISSION_METRICS_TABLE_POSTGRES_SQL,
                 CREATE_SUBMISSION_METRICS_SUBMISSION_ID_INDEX_POSTGRES_SQL,
                 CREATE_SUBMISSION_METRICS_CREATED_AT_INDEX_POSTGRES_SQL,
+            ),
+        )
+        await self._apply_postgres_migration(
+            "0009_create_submission_static_analysis",
+            (
+                CREATE_SUBMISSION_STATIC_ANALYSIS_TABLE_POSTGRES_SQL,
+                CREATE_SUBMISSION_STATIC_ANALYSIS_SUBMISSION_ID_INDEX_POSTGRES_SQL,
+                CREATE_SUBMISSION_STATIC_ANALYSIS_CREATED_AT_INDEX_POSTGRES_SQL,
             ),
         )
         await self._execute(BOOTSTRAP_USERS_SKILL_PROFILE_POSTGRES_SQL)
@@ -1132,6 +1367,44 @@ class PostgresUserRepository:
         if row is None:
             return None
         return _row_to_submission_metrics(row)
+
+    async def save_submission_static_analysis(
+        self,
+        submission_id: int,
+        language: str,
+        pylint_score: float | None,
+        complexity_score: float | None,
+        security_warnings: list[dict[str, object]],
+        pylint_warnings: list[dict[str, object]],
+    ) -> bool:
+        submission = await self._fetch_one(SELECT_SUBMISSION_EXISTS_POSTGRES_SQL, (submission_id,))
+        if submission is None:
+            return False
+
+        status = await self._execute(
+            INSERT_SUBMISSION_STATIC_ANALYSIS_POSTGRES_SQL,
+            (
+                submission_id,
+                language,
+                pylint_score,
+                complexity_score,
+                _encode_json_payload(security_warnings),
+                _encode_json_payload(pylint_warnings),
+            ),
+        )
+        return status in {"INSERT 0 1", "UPDATE 1"}
+
+    async def get_submission_static_analysis(
+        self,
+        submission_id: int,
+    ) -> SubmissionStaticAnalysisRecord | None:
+        row = await self._fetch_one(
+            SELECT_SUBMISSION_STATIC_ANALYSIS_POSTGRES_SQL,
+            (submission_id,),
+        )
+        if row is None:
+            return None
+        return _row_to_submission_static_analysis(row)
 
     async def create_task(
         self,
@@ -1284,6 +1557,44 @@ def _row_to_submission_metrics(row: tuple[object, ...]) -> SubmissionMetricsReco
         timed_out=bool(row[6]),
         created_at=str(row[7]),
     )
+
+
+def _row_to_submission_static_analysis(
+    row: tuple[object, ...],
+) -> SubmissionStaticAnalysisRecord:
+    return SubmissionStaticAnalysisRecord(
+        submission_id=int(row[0]),
+        language=str(row[1]),
+        pylint_score=float(row[2]) if row[2] is not None else None,
+        complexity_score=float(row[3]) if row[3] is not None else None,
+        security_warnings=_decode_json_array_payload(row[4]),
+        pylint_warnings=_decode_json_array_payload(row[5]),
+        created_at=str(row[6]),
+    )
+
+
+def _encode_json_payload(value: list[dict[str, object]]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _decode_json_array_payload(value: object) -> list[dict[str, object]]:
+    if value is None:
+        return []
+
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    normalized_items: list[dict[str, object]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        normalized_items.append({str(key): item[key] for key in item})
+    return normalized_items
 
 
 def _decode_skill_profile(value: object) -> dict[str, object] | None:
