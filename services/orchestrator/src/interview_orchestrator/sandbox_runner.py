@@ -3,9 +3,9 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 from uuid import uuid4
 
 MEMORY_USAGE_MARKER_PREFIX = "__METRIC_MAX_RSS_KB__:"
@@ -158,9 +158,7 @@ class DockerSandboxRunner:
     ) -> list[str]:
         image = self._image_by_language.get(language)
         if image is None:
-            raise ValueError(
-                f"Container image is not configured for language '{language}'."
-            )
+            raise ValueError(f"Container image is not configured for language '{language}'.")
 
         mount = f"{Path(workspace_dir).resolve()}:/workspace:ro"
         command: list[str] = [

@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from interview_bot.user_repository import UserRepository, build_user_repository
 from interview_common import get_settings
+
+from interview_bot.user_repository import UserRepository, build_user_repository
 
 LANG_CALLBACK_PREFIX = "lang:"
 SUPPORTED_LANGUAGES: tuple[tuple[str, str], ...] = (
@@ -19,8 +20,7 @@ MAX_SUBMISSION_LENGTH = 4000
 
 def _import_aiogram() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     try:
-        from aiogram import Bot, Dispatcher, Router
-        from aiogram import F
+        from aiogram import Bot, Dispatcher, F, Router
         from aiogram.filters import CommandStart
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     except ImportError as exc:
@@ -53,15 +53,13 @@ def _validate_submission_text(text: str | None) -> tuple[str | None, str | None]
     if normalized_text == "":
         return (
             None,
-            "Пустой ввод. "
-            "Отправьте непустой фрагмент кода.",
+            "Пустой ввод. Отправьте непустой фрагмент кода.",
         )
 
     if len(normalized_text) > MAX_SUBMISSION_LENGTH:
         return (
             None,
-            "Слишком большой фрагмент кода. "
-            f"Максимум {MAX_SUBMISSION_LENGTH} символов.",
+            f"Слишком большой фрагмент кода. Максимум {MAX_SUBMISSION_LENGTH} символов.",
         )
 
     return normalized_text, None
@@ -82,23 +80,16 @@ def _build_dispatcher(user_repository: UserRepository) -> Any:
         is_new_user = await user_repository.register_user(from_user.id)
         preferred_language = await user_repository.get_preferred_language(from_user.id)
         if preferred_language is None:
-            status_text = (
-                "Регистрация завершена."
-                if is_new_user
-                else "Профиль найден."
-            )
+            status_text = "Регистрация завершена." if is_new_user else "Профиль найден."
             await message.answer(
-                f"{status_text} "
-                "Чтобы начать, выберите язык "
-                "программирования:",
+                f"{status_text} Чтобы начать, выберите язык программирования:",
                 reply_markup=_language_keyboard(),
             )
             return
 
         selected_language = LANGUAGE_LABELS.get(preferred_language, preferred_language)
         await message.answer(
-            f"Текущий язык: {selected_language}. "
-            "Можно выбрать другой:",
+            f"Текущий язык: {selected_language}. Можно выбрать другой:",
             reply_markup=_language_keyboard(),
         )
 
@@ -132,10 +123,7 @@ def _build_dispatcher(user_repository: UserRepository) -> Any:
         await user_repository.set_preferred_language(from_user.id, language_code)
 
         if current_language is None:
-            response_text = (
-                f"Язык сохранен: {language_label}. "
-                "Теперь можно продолжить."
-            )
+            response_text = f"Язык сохранен: {language_label}. Теперь можно продолжить."
         else:
             response_text = f"Язык обновлен: {language_label}."
 
@@ -167,22 +155,17 @@ def _build_dispatcher(user_repository: UserRepository) -> Any:
             is_saved = await user_repository.save_submission(from_user.id, submission_text)
             if not is_saved:
                 await message.answer(
-                    "Не удалось сохранить решение. "
-                    "Выберите язык и повторите попытку.",
+                    "Не удалось сохранить решение. Выберите язык и повторите попытку.",
                     reply_markup=_language_keyboard(),
                 )
                 return
 
             language_label = LANGUAGE_LABELS.get(preferred_language, preferred_language)
-            await message.answer(
-                "Код сохранен в submissions. "
-                f"Текущий язык: {language_label}."
-            )
+            await message.answer(f"Код сохранен в submissions. Текущий язык: {language_label}.")
             return
 
         await message.answer(
-            "Перед отправкой решений "
-            "выберите язык программирования.",
+            "Перед отправкой решений выберите язык программирования.",
             reply_markup=_language_keyboard(),
         )
 

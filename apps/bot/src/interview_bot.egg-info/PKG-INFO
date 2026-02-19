@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: interview-bot
+Version: 0.1.0
+Summary: Telegram bot service for interview assistant
+Requires-Python: <3.14,>=3.11
+Requires-Dist: aiogram<4.0.0,>=3.15.0
+Requires-Dist: interview-common>=0.1.0
+Requires-Dist: psycopg[binary]<4.0.0,>=3.2.6

@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: interview-orchestrator
+Version: 0.1.0
+Summary: LangGraph orchestrator service
+Requires-Python: <3.14,>=3.11
+Requires-Dist: bandit<2.0.0,>=1.8.0
+Requires-Dist: interview-common>=0.1.0
+Requires-Dist: langchain<0.4.0,>=0.3.20
+Requires-Dist: langgraph<0.3.0,>=0.2.0
+Requires-Dist: pylint<4.0.0,>=3.3.0
+Requires-Dist: radon<7.0.0,>=6.0.1

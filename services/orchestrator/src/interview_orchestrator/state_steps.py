@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping, Protocol, cast
+from typing import Protocol, TypedDict, cast
 
 from interview_orchestrator.agent_state import AgentState, validate_agent_state
 from interview_orchestrator.sandbox_runner import (
@@ -16,8 +17,8 @@ from interview_orchestrator.static_analysis import (
 )
 from interview_orchestrator.test_runner import (
     PredefinedTestCaseResult,
-    PredefinedTestRunResult,
     PredefinedTestRunner,
+    PredefinedTestRunResult,
 )
 
 
@@ -29,8 +30,7 @@ class SandboxStepExecutor(Protocol):
         limits: SandboxLimits | None = None,
         main_class_name: str = "Main",
         stdin_data: str = "",
-    ) -> SandboxExecutionResult:
-        ...
+    ) -> SandboxExecutionResult: ...
 
 
 class TestStepRunner(Protocol):
@@ -41,13 +41,27 @@ class TestStepRunner(Protocol):
         test_cases_json: str,
         limits: SandboxLimits | None = None,
         main_class_name: str = "Main",
-    ) -> PredefinedTestRunResult:
-        ...
+    ) -> PredefinedTestRunResult: ...
 
 
 class StaticAnalysisExecutor(Protocol):
-    def analyze(self, source_code: str, filename: str = "main.py") -> PythonStaticAnalysisResult:
-        ...
+    def analyze(
+        self, source_code: str, filename: str = "main.py"
+    ) -> PythonStaticAnalysisResult: ...
+
+
+class _TaskTemplate(TypedDict):
+    prompt: str
+    test_cases_json: str
+    category: str
+    difficulty: int
+
+
+class _ScoreBucket(TypedDict):
+    attempts: int
+    average_score: float
+    best_score: float
+    last_score: float
 
 
 @dataclass(frozen=True)
@@ -73,13 +87,11 @@ class TaskGenerationExecutor(Protocol):
         user_id: str,
         language: str,
         task_id: str,
-    ) -> GeneratedTask:
-        ...
+    ) -> GeneratedTask: ...
 
 
 class LLMReviewExecutor(Protocol):
-    def review(self, state: AgentState) -> dict[str, object]:
-        ...
+    def review(self, state: AgentState) -> dict[str, object]: ...
 
 
 class ProfileUpdateExecutor(Protocol):
@@ -90,20 +102,18 @@ class ProfileUpdateExecutor(Protocol):
         category: str,
         final_score: float,
         current_profile: Mapping[str, object] | None = None,
-    ) -> dict[str, object]:
-        ...
+    ) -> dict[str, object]: ...
 
 
 class DeterministicTaskGenerator:
-    _TASKS_BY_LANGUAGE: dict[str, dict[str, object]] = {
+    _TASKS_BY_LANGUAGE: dict[str, _TaskTemplate] = {
         "python": {
             "prompt": (
                 "Read two integers from stdin and print their sum. "
                 "Use exact formatting with a trailing newline."
             ),
             "test_cases_json": (
-                '[{"input":"1 2\\n","output":"3\\n"},'
-                '{"input":"-10 7\\n","output":"-3\\n"}]'
+                '[{"input":"1 2\\n","output":"3\\n"},{"input":"-10 7\\n","output":"-3\\n"}]'
             ),
             "category": "math",
             "difficulty": 1,
@@ -111,8 +121,7 @@ class DeterministicTaskGenerator:
         "go": {
             "prompt": "Read two integers from stdin and print their sum.",
             "test_cases_json": (
-                '[{"input":"9 8\\n","output":"17\\n"},'
-                '{"input":"0 0\\n","output":"0\\n"}]'
+                '[{"input":"9 8\\n","output":"17\\n"},{"input":"0 0\\n","output":"0\\n"}]'
             ),
             "category": "math",
             "difficulty": 1,
@@ -120,8 +129,7 @@ class DeterministicTaskGenerator:
         "java": {
             "prompt": "Read two integers from stdin and print their sum.",
             "test_cases_json": (
-                '[{"input":"4 5\\n","output":"9\\n"},'
-                '{"input":"100 -1\\n","output":"99\\n"}]'
+                '[{"input":"4 5\\n","output":"9\\n"},{"input":"100 -1\\n","output":"99\\n"}]'
             ),
             "category": "math",
             "difficulty": 1,
@@ -129,8 +137,7 @@ class DeterministicTaskGenerator:
         "cpp": {
             "prompt": "Read two integers from stdin and print their sum.",
             "test_cases_json": (
-                '[{"input":"3 7\\n","output":"10\\n"},'
-                '{"input":"12 30\\n","output":"42\\n"}]'
+                '[{"input":"3 7\\n","output":"10\\n"},{"input":"12 30\\n","output":"42\\n"}]'
             ),
             "category": "math",
             "difficulty": 1,
@@ -147,10 +154,10 @@ class DeterministicTaskGenerator:
         if template is None:
             template = self._TASKS_BY_LANGUAGE["python"]
 
-        prompt = str(template["prompt"])
-        test_cases_json = str(template["test_cases_json"])
-        category = str(template["category"])
-        difficulty = int(template["difficulty"])
+        prompt = template["prompt"]
+        test_cases_json = template["test_cases_json"]
+        category = template["category"]
+        difficulty = template["difficulty"]
 
         return GeneratedTask(
             task_id=f"{task_id}:{user_id}:{language}",
@@ -245,7 +252,7 @@ class InMemoryProfileUpdater:
         if len(recent_scores) > max_recent_scores:
             recent_scores = recent_scores[-max_recent_scores:]
 
-        profile["version"] = int(profile.get("version", 1)) if profile.get("version") else 1
+        profile["version"] = _normalize_profile_version(profile.get("version"))
         profile["user_id"] = user_id
         profile["language_scores"] = language_scores
         profile["category_scores"] = category_scores
@@ -377,7 +384,7 @@ def update_profile_node(
 ) -> AgentState:
     validated_state = validate_agent_state(state)
     score_value = validated_state.get("final_score")
-    if isinstance(score_value, (int, float)):
+    if isinstance(score_value, int | float):
         final_score = float(score_value)
         current_state = validated_state
     else:
@@ -684,13 +691,13 @@ def _compute_static_score(state: AgentState) -> float:
         return 80.0
 
     pylint_score = static_analysis.get("pylint_score")
-    if isinstance(pylint_score, (int, float)):
+    if isinstance(pylint_score, int | float):
         pylint_component = max(0.0, min(100.0, float(pylint_score) * 10.0))
     else:
         pylint_component = 75.0
 
     complexity_score = static_analysis.get("complexity_score")
-    if isinstance(complexity_score, (int, float)):
+    if isinstance(complexity_score, int | float):
         complexity_component = max(0.0, 100.0 - (max(0.0, float(complexity_score) - 5.0) * 10.0))
     else:
         complexity_component = 80.0
@@ -718,7 +725,7 @@ def _compute_llm_review_score(state: AgentState) -> float:
         return _compute_test_score(state)
 
     raw_score = llm_review.get("score")
-    if isinstance(raw_score, (int, float)):
+    if isinstance(raw_score, int | float):
         return max(0.0, min(100.0, float(raw_score)))
     return _compute_test_score(state)
 
@@ -762,11 +769,11 @@ def _normalize_profile(profile: Mapping[str, object] | None) -> dict[str, object
     return normalized
 
 
-def _normalize_score_bucket_map(value: object) -> dict[str, dict[str, object]]:
+def _normalize_score_bucket_map(value: object) -> dict[str, _ScoreBucket]:
     if not isinstance(value, dict):
         return {}
 
-    normalized: dict[str, dict[str, object]] = {}
+    normalized: dict[str, _ScoreBucket] = {}
     for raw_key, raw_bucket in value.items():
         key = str(raw_key).strip().lower()
         if key == "":
@@ -775,7 +782,7 @@ def _normalize_score_bucket_map(value: object) -> dict[str, dict[str, object]]:
     return normalized
 
 
-def _normalize_score_bucket(value: object) -> dict[str, object]:
+def _normalize_score_bucket(value: object) -> _ScoreBucket:
     if not isinstance(value, dict):
         return {
             "attempts": 0,
@@ -788,13 +795,13 @@ def _normalize_score_bucket(value: object) -> dict[str, object]:
     attempts = attempts_raw if isinstance(attempts_raw, int) and attempts_raw > 0 else 0
 
     average_raw = value.get("average_score")
-    average_score = float(average_raw) if isinstance(average_raw, (int, float)) else 0.0
+    average_score = float(average_raw) if isinstance(average_raw, int | float) else 0.0
 
     best_raw = value.get("best_score")
-    best_score = float(best_raw) if isinstance(best_raw, (int, float)) else 0.0
+    best_score = float(best_raw) if isinstance(best_raw, int | float) else 0.0
 
     last_raw = value.get("last_score")
-    last_score = float(last_raw) if isinstance(last_raw, (int, float)) else 0.0
+    last_score = float(last_raw) if isinstance(last_raw, int | float) else 0.0
 
     return {
         "attempts": attempts,
@@ -807,11 +814,11 @@ def _normalize_score_bucket(value: object) -> dict[str, object]:
 def _apply_new_score_to_bucket(
     current_bucket: Mapping[str, object] | None,
     score: float,
-) -> dict[str, object]:
+) -> _ScoreBucket:
     normalized_bucket = _normalize_score_bucket(current_bucket)
-    attempts = int(normalized_bucket["attempts"])
-    average_score = float(normalized_bucket["average_score"])
-    best_score = float(normalized_bucket["best_score"])
+    attempts = normalized_bucket["attempts"]
+    average_score = normalized_bucket["average_score"]
+    best_score = normalized_bucket["best_score"]
 
     next_attempts = attempts + 1
     next_average = ((average_score * attempts) + score) / next_attempts
@@ -831,6 +838,20 @@ def _normalize_recent_scores(value: object) -> list[float]:
 
     normalized_scores: list[float] = []
     for raw_score in value:
-        if isinstance(raw_score, (int, float)):
+        if isinstance(raw_score, int | float):
             normalized_scores.append(round(max(0.0, min(100.0, float(raw_score))), 2))
     return normalized_scores
+
+
+def _normalize_profile_version(value: object) -> int:
+    if isinstance(value, int) and value > 0:
+        return value
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            parsed = int(stripped)
+            if parsed > 0:
+                return parsed
+
+    return 1

@@ -6,8 +6,7 @@ from interview_common import get_settings
 def main() -> None:
     settings = get_settings()
     print(
-        "Orchestrator bootstrap complete "
-        f"(env={settings.app_env}, log_level={settings.log_level})."
+        f"Orchestrator bootstrap complete (env={settings.app_env}, log_level={settings.log_level})."
     )
 
 

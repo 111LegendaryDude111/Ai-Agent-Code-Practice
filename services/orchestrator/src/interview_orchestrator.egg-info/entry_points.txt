@@ -1,0 +1,2 @@
+[console_scripts]
+interview-orchestrator = interview_orchestrator.main:main

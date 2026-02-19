@@ -14,7 +14,7 @@ help:
 	@echo "  make install             - Install workspace + dev dependencies"
 	@echo "  make pre-commit-install  - Install git hooks"
 	@echo "  make lint                - Run ruff checks"
-	@echo "  make format              - Run black formatter"
+	@echo "  make format              - Run format hooks (pre-commit parity)"
 	@echo "  make typecheck           - Run mypy"
 	@echo "  make test                - Run unit tests"
 	@echo "  make run-bot             - Run bot bootstrap"
@@ -58,11 +58,25 @@ lint:
 	fi
 
 format:
-	@if [ -x "$(BIN)/black" ]; then \
-		$(BIN)/black .; \
+	@if [ -x "$(BIN)/pre-commit" ]; then \
+		for hook in ruff ruff-format black; do \
+			$(BIN)/pre-commit run $$hook --all-files || true; \
+		done; \
+		for hook in ruff ruff-format black; do \
+			$(BIN)/pre-commit run $$hook --all-files; \
+		done; \
 	else \
-		echo "black is not installed in $(VENV). Run make install with internet access."; \
-		exit 1; \
+		if [ ! -x "$(BIN)/ruff" ]; then \
+			echo "ruff is not installed in $(VENV). Run make install with internet access."; \
+			exit 1; \
+		fi; \
+		if [ ! -x "$(BIN)/black" ]; then \
+			echo "black is not installed in $(VENV). Run make install with internet access."; \
+			exit 1; \
+		fi; \
+		$(BIN)/ruff check --fix .; \
+		$(BIN)/ruff format .; \
+		$(BIN)/black .; \
 	fi
 
 typecheck:

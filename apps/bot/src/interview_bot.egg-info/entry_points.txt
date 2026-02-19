@@ -1,0 +1,2 @@
+[console_scripts]
+interview-bot = interview_bot.main:main

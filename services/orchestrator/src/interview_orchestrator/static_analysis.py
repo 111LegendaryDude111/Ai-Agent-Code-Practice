@@ -254,9 +254,7 @@ def _parse_radon_result(
                 complexity=int(raw_block.get("complexity") or 0),
                 line=int(raw_block.get("lineno") or 0),
                 endline=(
-                    int(raw_block["endline"])
-                    if raw_block.get("endline") is not None
-                    else None
+                    int(raw_block["endline"]) if raw_block.get("endline") is not None else None
                 ),
             )
         )
@@ -319,7 +317,7 @@ def _load_json_payload(text: str) -> object | None:
 
 
 def _extract_pylint_score(raw_score: object, command_result: _CommandResult) -> float | None:
-    if isinstance(raw_score, (int, float)):
+    if isinstance(raw_score, int | float):
         return round(float(raw_score), 2)
 
     score_match = PYLINT_SCORE_PATTERN.search(command_result.stdout)

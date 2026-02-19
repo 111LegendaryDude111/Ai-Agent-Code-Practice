@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Mapping, NotRequired, TypedDict, cast
+from collections.abc import Mapping
+from typing import NotRequired, TypedDict, cast
 
 SUPPORTED_LANGUAGES: set[str] = {"python", "go", "java", "cpp"}
 
@@ -77,8 +78,7 @@ def validate_agent_state(state: Mapping[str, object]) -> AgentState:
     language = str(normalized_state["language"])
     if language not in SUPPORTED_LANGUAGES:
         raise AgentStateValidationError(
-            "state.language must be one of "
-            f"{sorted(SUPPORTED_LANGUAGES)}, got {language!r}."
+            f"state.language must be one of {sorted(SUPPORTED_LANGUAGES)}, got {language!r}."
         )
 
     _validate_optional_string(normalized_state, "test_cases")
@@ -93,7 +93,7 @@ def validate_agent_state(state: Mapping[str, object]) -> AgentState:
 
     if "final_score" in normalized_state and not isinstance(
         normalized_state["final_score"],
-        (int, float),
+        int | float,
     ):
         raise AgentStateValidationError("state.final_score must be a number when present.")
 
@@ -242,5 +242,5 @@ def _validate_int_or_none(payload: dict[str, object], key: str, field_name: str)
 
 def _validate_float_or_none(payload: dict[str, object], key: str, field_name: str) -> None:
     value = payload.get(key)
-    if value is not None and not isinstance(value, (int, float)):
+    if value is not None and not isinstance(value, int | float):
         raise AgentStateValidationError(f"{field_name} must be number or null.")

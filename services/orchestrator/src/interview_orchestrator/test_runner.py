@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import difflib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, Sequence
+from typing import Any, Protocol
 
 from interview_orchestrator.sandbox_runner import (
     DockerSandboxRunner,
@@ -54,8 +55,7 @@ class SandboxExecutor(Protocol):
         limits: SandboxLimits | None = None,
         main_class_name: str = "Main",
         stdin_data: str = "",
-    ) -> SandboxExecutionResult:
-        ...
+    ) -> SandboxExecutionResult: ...
 
 
 class PredefinedTestRunner:

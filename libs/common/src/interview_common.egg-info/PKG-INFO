@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: interview-common
+Version: 0.1.0
+Summary: Shared settings and models for interview assistant
+Requires-Python: <3.14,>=3.11

@@ -1,0 +1,6 @@
+bandit<2.0.0,>=1.8.0
+interview-common>=0.1.0
+langchain<0.4.0,>=0.3.20
+langgraph<0.3.0,>=0.2.0
+pylint<4.0.0,>=3.3.0
+radon<7.0.0,>=6.0.1

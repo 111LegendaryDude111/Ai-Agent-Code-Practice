@@ -54,6 +54,9 @@ DEFAULT_SKILL_PROFILE_JSON = json.dumps(
     sort_keys=True,
     separators=(",", ":"),
 )
+DEFAULT_SKILL_PROFILE_SQL_JSON = (
+    '{"category_scores":{},"language_scores":{},"recent_scores":[],"version":1}'
+)
 
 CREATE_SCHEMA_MIGRATIONS_TABLE_SQLITE_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -62,12 +65,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 """
 
-CREATE_USERS_TABLE_SQL = """
+CREATE_USERS_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id BIGINT NOT NULL UNIQUE,
     preferred_language TEXT,
-    skill_profile TEXT NOT NULL DEFAULT '{"category_scores":{},"language_scores":{},"recent_scores":[],"version":1}',
+    skill_profile TEXT NOT NULL DEFAULT '{DEFAULT_SKILL_PROFILE_SQL_JSON}',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -159,12 +162,12 @@ DELETE FROM tasks
 WHERE id = ?;
 """
 
-CREATE_USERS_TABLE_POSTGRES_SQL = """
+CREATE_USERS_TABLE_POSTGRES_SQL = f"""
 CREATE TABLE IF NOT EXISTS users (
     id BIGSERIAL PRIMARY KEY,
     telegram_id BIGINT NOT NULL UNIQUE,
     preferred_language TEXT,
-    skill_profile JSONB NOT NULL DEFAULT '{"category_scores":{},"language_scores":{},"recent_scores":[],"version":1}'::jsonb,
+    skill_profile JSONB NOT NULL DEFAULT '{DEFAULT_SKILL_PROFILE_SQL_JSON}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 """
@@ -179,15 +182,15 @@ ALTER TABLE users
 ADD COLUMN IF NOT EXISTS skill_profile JSONB;
 """
 
-BOOTSTRAP_USERS_SKILL_PROFILE_POSTGRES_SQL = """
+BOOTSTRAP_USERS_SKILL_PROFILE_POSTGRES_SQL = f"""
 UPDATE users
-SET skill_profile = '{"category_scores":{},"language_scores":{},"recent_scores":[],"version":1}'::jsonb
+SET skill_profile = '{DEFAULT_SKILL_PROFILE_SQL_JSON}'::jsonb
 WHERE skill_profile IS NULL;
 """
 
-ALTER_USERS_TABLE_POSTGRES_ENFORCE_SKILL_PROFILE_SQL = """
+ALTER_USERS_TABLE_POSTGRES_ENFORCE_SKILL_PROFILE_SQL = f"""
 ALTER TABLE users
-ALTER COLUMN skill_profile SET DEFAULT '{"category_scores":{},"language_scores":{},"recent_scores":[],"version":1}'::jsonb;
+ALTER COLUMN skill_profile SET DEFAULT '{DEFAULT_SKILL_PROFILE_SQL_JSON}'::jsonb;
 """
 
 ALTER_USERS_TABLE_POSTGRES_ENFORCE_SKILL_PROFILE_NOT_NULL_SQL = """
@@ -225,9 +228,9 @@ INSERT OR IGNORE INTO schema_migrations (version)
 VALUES (?);
 """
 
-ALTER_USERS_TABLE_SQLITE_ADD_SKILL_PROFILE_SQL = """
+ALTER_USERS_TABLE_SQLITE_ADD_SKILL_PROFILE_SQL = f"""
 ALTER TABLE users
-ADD COLUMN skill_profile TEXT NOT NULL DEFAULT '{"category_scores":{},"language_scores":{},"recent_scores":[],"version":1}';
+ADD COLUMN skill_profile TEXT NOT NULL DEFAULT '{DEFAULT_SKILL_PROFILE_SQL_JSON}';
 """
 
 INSERT_USER_POSTGRES_SQL = """
@@ -643,36 +646,29 @@ WHERE telegram_id = %s
 
 
 class UserRepository(Protocol):
-    async def ensure_schema(self) -> None:
-        ...
+    async def ensure_schema(self) -> None: ...
 
-    async def register_user(self, telegram_id: int) -> bool:
-        ...
+    async def register_user(self, telegram_id: int) -> bool: ...
 
-    async def get_preferred_language(self, telegram_id: int) -> str | None:
-        ...
+    async def get_preferred_language(self, telegram_id: int) -> str | None: ...
 
-    async def get_skill_profile(self, telegram_id: int) -> dict[str, object] | None:
-        ...
+    async def get_skill_profile(self, telegram_id: int) -> dict[str, object] | None: ...
 
-    async def set_preferred_language(self, telegram_id: int, preferred_language: str) -> bool:
-        ...
+    async def set_preferred_language(self, telegram_id: int, preferred_language: str) -> bool: ...
 
     async def save_submission(
         self,
         telegram_id: int,
         code: str,
         task_id: int | None = None,
-    ) -> bool:
-        ...
+    ) -> bool: ...
 
     async def save_submission_with_id(
         self,
         telegram_id: int,
         code: str,
         task_id: int | None = None,
-    ) -> int | None:
-        ...
+    ) -> int | None: ...
 
     async def save_submission_metrics(
         self,
@@ -683,11 +679,11 @@ class UserRepository(Protocol):
         stdout: str,
         stderr: str,
         timed_out: bool,
-    ) -> bool:
-        ...
+    ) -> bool: ...
 
-    async def get_submission_metrics(self, submission_id: int) -> SubmissionMetricsRecord | None:
-        ...
+    async def get_submission_metrics(
+        self, submission_id: int
+    ) -> SubmissionMetricsRecord | None: ...
 
     async def save_submission_static_analysis(
         self,
@@ -697,14 +693,12 @@ class UserRepository(Protocol):
         complexity_score: float | None,
         security_warnings: list[dict[str, object]],
         pylint_warnings: list[dict[str, object]],
-    ) -> bool:
-        ...
+    ) -> bool: ...
 
     async def get_submission_static_analysis(
         self,
         submission_id: int,
-    ) -> SubmissionStaticAnalysisRecord | None:
-        ...
+    ) -> SubmissionStaticAnalysisRecord | None: ...
 
     async def create_task(
         self,
@@ -713,14 +707,13 @@ class UserRepository(Protocol):
         difficulty: int,
         prompt: str,
         test_cases: str,
-    ) -> int:
-        ...
+    ) -> int: ...
 
-    async def get_task(self, task_id: int) -> TaskRecord | None:
-        ...
+    async def get_task(self, task_id: int) -> TaskRecord | None: ...
 
-    async def list_tasks(self, language: str | None = None, limit: int = 20) -> list[TaskRecord]:
-        ...
+    async def list_tasks(
+        self, language: str | None = None, limit: int = 20
+    ) -> list[TaskRecord]: ...
 
     async def update_task(
         self,
@@ -730,11 +723,9 @@ class UserRepository(Protocol):
         difficulty: int,
         prompt: str,
         test_cases: str,
-    ) -> bool:
-        ...
+    ) -> bool: ...
 
-    async def delete_task(self, task_id: int) -> bool:
-        ...
+    async def delete_task(self, task_id: int) -> bool: ...
 
 
 class SQLiteUserRepository:
@@ -1332,7 +1323,7 @@ class PostgresUserRepository:
         )
         if row is None:
             return None
-        return int(row[0])
+        return _coerce_int(row[0], "submission.id")
 
     async def save_submission_metrics(
         self,
@@ -1420,7 +1411,7 @@ class PostgresUserRepository:
         )
         if row is None:
             return 0
-        return int(row[0])
+        return _coerce_int(row[0], "task.id")
 
     async def get_task(self, task_id: int) -> TaskRecord | None:
         row = await self._fetch_one(SELECT_TASK_POSTGRES_SQL, (task_id,))
@@ -1534,12 +1525,38 @@ def normalize_database_url(database_url: str) -> str:
     return database_url
 
 
+def _coerce_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        raise ValueError(f"{field_name} must be an integer-compatible value.")
+    if isinstance(value, str):
+        return int(value.strip())
+
+    raise TypeError(f"{field_name} must be int/float/str, got {type(value).__name__}.")
+
+
+def _coerce_float(value: object, field_name: str) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        return float(value.strip())
+
+    raise TypeError(f"{field_name} must be int/float/str, got {type(value).__name__}.")
+
+
 def _row_to_task(row: tuple[object, ...]) -> TaskRecord:
     return TaskRecord(
-        id=int(row[0]),
+        id=_coerce_int(row[0], "task.id"),
         language=str(row[1]),
         category=str(row[2]),
-        difficulty=int(row[3]),
+        difficulty=_coerce_int(row[3], "task.difficulty"),
         prompt=str(row[4]),
         test_cases=str(row[5]),
         created_at=str(row[6]),
@@ -1548,10 +1565,16 @@ def _row_to_task(row: tuple[object, ...]) -> TaskRecord:
 
 def _row_to_submission_metrics(row: tuple[object, ...]) -> SubmissionMetricsRecord:
     return SubmissionMetricsRecord(
-        submission_id=int(row[0]),
-        runtime_ms=int(row[1]),
-        memory_usage_kb=int(row[2]) if row[2] is not None else None,
-        exit_code=int(row[3]) if row[3] is not None else None,
+        submission_id=_coerce_int(row[0], "submission_metrics.submission_id"),
+        runtime_ms=_coerce_int(row[1], "submission_metrics.runtime_ms"),
+        memory_usage_kb=(
+            _coerce_int(row[2], "submission_metrics.memory_usage_kb")
+            if row[2] is not None
+            else None
+        ),
+        exit_code=(
+            _coerce_int(row[3], "submission_metrics.exit_code") if row[3] is not None else None
+        ),
         stdout=str(row[4]),
         stderr=str(row[5]),
         timed_out=bool(row[6]),
@@ -1563,10 +1586,18 @@ def _row_to_submission_static_analysis(
     row: tuple[object, ...],
 ) -> SubmissionStaticAnalysisRecord:
     return SubmissionStaticAnalysisRecord(
-        submission_id=int(row[0]),
+        submission_id=_coerce_int(row[0], "submission_static_analysis.submission_id"),
         language=str(row[1]),
-        pylint_score=float(row[2]) if row[2] is not None else None,
-        complexity_score=float(row[3]) if row[3] is not None else None,
+        pylint_score=(
+            _coerce_float(row[2], "submission_static_analysis.pylint_score")
+            if row[2] is not None
+            else None
+        ),
+        complexity_score=(
+            _coerce_float(row[3], "submission_static_analysis.complexity_score")
+            if row[3] is not None
+            else None
+        ),
         security_warnings=_decode_json_array_payload(row[4]),
         pylint_warnings=_decode_json_array_payload(row[5]),
         created_at=str(row[6]),

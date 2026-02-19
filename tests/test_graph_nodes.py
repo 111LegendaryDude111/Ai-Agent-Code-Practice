@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from typing import cast
 
+from interview_orchestrator.agent_state import AgentState
 from interview_orchestrator.sandbox_runner import SandboxExecutionResult
 from interview_orchestrator.state_steps import (
     GeneratedTask,
@@ -130,7 +132,7 @@ class StubStaticAnalyzer:
 
 
 class StubLLMReviewer:
-    def review(self, state: dict[str, object]) -> dict[str, object]:
+    def review(self, state: AgentState) -> dict[str, object]:
         return {
             "summary": "Structured review.",
             "strengths": ["Passes all tests."],
@@ -207,7 +209,12 @@ class GraphNodesTests(unittest.TestCase):
         self.assertIn("llm_review", updated_state)
         self.assertIn("summary", updated_state["llm_review"])
         self.assertIn("score", updated_state["llm_review"])
-        self.assertGreaterEqual(float(updated_state["llm_review"]["score"]), 0.0)
+        llm_review = cast(dict[str, object], updated_state["llm_review"])
+        llm_score = llm_review.get("score")
+        self.assertIsInstance(llm_score, (int, float))
+        if not isinstance(llm_score, int | float):
+            self.fail("Expected numeric llm review score.")
+        self.assertGreaterEqual(float(llm_score), 0.0)
 
     def test_score_aggregation_node_writes_final_score_and_breakdown(self) -> None:
         updated_state = score_aggregation_node(
@@ -262,8 +269,9 @@ class GraphNodesTests(unittest.TestCase):
         )
 
         skill_profile = updated_state["skill_profile"]
-        language_scores = skill_profile["language_scores"]
-        python_stats = language_scores["python"]
+        profile_map = cast(dict[str, object], skill_profile)
+        language_scores = cast(dict[str, object], profile_map["language_scores"])
+        python_stats = cast(dict[str, object], language_scores["python"])
 
         self.assertEqual(python_stats["attempts"], 1)
         self.assertEqual(python_stats["last_score"], 90.0)
