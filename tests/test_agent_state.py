@@ -196,6 +196,72 @@ class AgentStateTests(unittest.TestCase):
                 }
             )
 
+    def test_validate_agent_state_accepts_branching_payload(self) -> None:
+        state = validate_agent_state(
+            {
+                "user_id": "42",
+                "task_id": "task-1",
+                "language": "python",
+                "code": "print('ok')",
+                "retry_count": 1,
+                "recommended_difficulty": 2,
+                "branching": {
+                    "retry": {
+                        "should_retry": False,
+                        "retries_used": 1,
+                        "retries_remaining": 0,
+                        "max_retries": 1,
+                        "reason": "Retry limit reached.",
+                    },
+                    "adaptive_difficulty": {
+                        "action": "decrease",
+                        "current_difficulty": 2,
+                        "next_difficulty": 1,
+                        "reason": "Repeated failures detected.",
+                    },
+                    "hint": {
+                        "should_show_hint": True,
+                        "hints": ["Check first failing test case."],
+                    },
+                    "next_node": "show_hint",
+                },
+            }
+        )
+
+        self.assertIn("branching", state)
+        self.assertEqual(state["recommended_difficulty"], 2)
+
+    def test_validate_agent_state_rejects_invalid_branching_action(self) -> None:
+        with self.assertRaises(AgentStateValidationError):
+            validate_agent_state(
+                {
+                    "user_id": "42",
+                    "task_id": "task-1",
+                    "language": "python",
+                    "code": "print('ok')",
+                    "branching": {
+                        "retry": {
+                            "should_retry": False,
+                            "retries_used": 0,
+                            "retries_remaining": 0,
+                            "max_retries": 1,
+                            "reason": "ok",
+                        },
+                        "adaptive_difficulty": {
+                            "action": "up",
+                            "current_difficulty": 1,
+                            "next_difficulty": 2,
+                            "reason": "ok",
+                        },
+                        "hint": {
+                            "should_show_hint": False,
+                            "hints": [],
+                        },
+                        "next_node": "complete",
+                    },
+                }
+            )
+
     def test_execute_sandbox_step_writes_execution_result_and_metrics(self) -> None:
         sandbox = StubSandboxExecutor(_sandbox_result())
         updated_state = execute_sandbox_step(

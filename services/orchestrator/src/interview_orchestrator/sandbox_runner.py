@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import subprocess
 import tempfile
 import time
@@ -9,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 MEMORY_USAGE_MARKER_PREFIX = "__METRIC_MAX_RSS_KB__:"
+_SANDBOX_LOGGER = logging.getLogger("interview_orchestrator.sandbox")
 
 
 DEFAULT_IMAGE_BY_LANGUAGE: dict[str, str] = {
@@ -77,6 +80,17 @@ class DockerSandboxRunner:
 
         source_file_name = DEFAULT_SOURCE_FILE_BY_LANGUAGE[language]
         container_name = f"interview-sandbox-{language}-{uuid4().hex[:12]}"
+        _log_sandbox_event(
+            logging.INFO,
+            event="sandbox.execution.started",
+            language=language,
+            container_name=container_name,
+            cpu_limit=normalized_limits.cpu_limit,
+            memory_limit_mb=normalized_limits.memory_limit_mb,
+            timeout_seconds=normalized_limits.timeout_seconds,
+            pids_limit=normalized_limits.pids_limit,
+            source_size_bytes=len(source_code.encode("utf-8")),
+        )
 
         with tempfile.TemporaryDirectory(prefix=f"sandbox_{language}_") as workspace_dir:
             source_path = Path(workspace_dir) / source_file_name
@@ -102,7 +116,7 @@ class DockerSandboxRunner:
                     check=False,
                 )
                 memory_usage_kb, sanitized_stderr = _extract_memory_usage_kb(completed.stderr)
-                return SandboxExecutionResult(
+                result = SandboxExecutionResult(
                     language=language,
                     exit_code=completed.returncode,
                     stdout=completed.stdout,
@@ -112,6 +126,18 @@ class DockerSandboxRunner:
                     duration_seconds=time.monotonic() - started_at,
                     container_name=container_name,
                 )
+                _log_sandbox_event(
+                    logging.INFO,
+                    event="sandbox.execution.completed",
+                    language=language,
+                    container_name=container_name,
+                    exit_code=result.exit_code,
+                    duration_seconds=round(result.duration_seconds, 4),
+                    timed_out=False,
+                    memory_usage_kb=memory_usage_kb,
+                    stderr_excerpt=_truncate_log_message(sanitized_stderr),
+                )
+                return result
             except subprocess.TimeoutExpired as exc:
                 timeout_message = (
                     f"Execution timed out after {normalized_limits.timeout_seconds:.2f}s."
@@ -123,7 +149,7 @@ class DockerSandboxRunner:
                 else:
                     stderr = timeout_message
 
-                return SandboxExecutionResult(
+                result = SandboxExecutionResult(
                     language=language,
                     exit_code=None,
                     stdout=_coerce_stream(exc.output),
@@ -133,8 +159,19 @@ class DockerSandboxRunner:
                     duration_seconds=time.monotonic() - started_at,
                     container_name=container_name,
                 )
+                _log_sandbox_event(
+                    logging.WARNING,
+                    event="sandbox.execution.timed_out",
+                    language=language,
+                    container_name=container_name,
+                    timeout_seconds=normalized_limits.timeout_seconds,
+                    duration_seconds=round(result.duration_seconds, 4),
+                    memory_usage_kb=memory_usage_kb,
+                    stderr_excerpt=_truncate_log_message(stderr),
+                )
+                return result
             except FileNotFoundError:
-                return SandboxExecutionResult(
+                result = SandboxExecutionResult(
                     language=language,
                     exit_code=None,
                     stdout="",
@@ -144,6 +181,39 @@ class DockerSandboxRunner:
                     duration_seconds=time.monotonic() - started_at,
                     container_name=container_name,
                 )
+                _log_sandbox_event(
+                    logging.ERROR,
+                    event="sandbox.execution.crashed",
+                    language=language,
+                    container_name=container_name,
+                    crash_type="docker_cli_missing",
+                    stderr=result.stderr,
+                )
+                return result
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - sandbox failures must be reported consistently
+                error_message = f"Sandbox runner crashed: {type(exc).__name__}: {exc}"
+                result = SandboxExecutionResult(
+                    language=language,
+                    exit_code=None,
+                    stdout="",
+                    stderr=error_message,
+                    memory_usage_kb=None,
+                    timed_out=False,
+                    duration_seconds=time.monotonic() - started_at,
+                    container_name=container_name,
+                )
+                _log_sandbox_event(
+                    logging.ERROR,
+                    event="sandbox.execution.crashed",
+                    language=language,
+                    container_name=container_name,
+                    crash_type=type(exc).__name__,
+                    error=str(exc),
+                    exc_info=True,
+                )
+                return result
             finally:
                 self._cleanup_container(container_name)
 
@@ -193,13 +263,29 @@ class DockerSandboxRunner:
 
     def _cleanup_container(self, container_name: str) -> None:
         try:
-            subprocess.run(
+            completed = subprocess.run(
                 [self._docker_binary, "rm", "-f", container_name],
                 capture_output=True,
                 text=True,
                 check=False,
             )
+            if completed.returncode != 0:
+                _log_sandbox_event(
+                    logging.WARNING,
+                    event="sandbox.cleanup.failed",
+                    language="unknown",
+                    container_name=container_name,
+                    exit_code=completed.returncode,
+                    stderr_excerpt=_truncate_log_message(completed.stderr),
+                )
         except FileNotFoundError:
+            _log_sandbox_event(
+                logging.ERROR,
+                event="sandbox.cleanup.failed",
+                language="unknown",
+                container_name=container_name,
+                crash_type="docker_cli_missing",
+            )
             return
 
 
@@ -209,6 +295,38 @@ def _coerce_stream(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
+
+
+def _log_sandbox_event(
+    level: int,
+    *,
+    event: str,
+    language: str,
+    container_name: str,
+    exc_info: bool = False,
+    **fields: object,
+) -> None:
+    payload: dict[str, object] = {
+        "event": event,
+        "language": language,
+        "container_name": container_name,
+    }
+    payload.update(fields)
+    _SANDBOX_LOGGER.log(
+        level,
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str),
+        exc_info=exc_info,
+    )
+
+
+def _truncate_log_message(value: object, max_length: int = 200) -> str:
+    if max_length < 4 or not isinstance(value, str):
+        return ""
+
+    normalized = value.replace("\n", "\\n")
+    if len(normalized) <= max_length:
+        return normalized
+    return f"{normalized[: max_length - 3]}..."
 
 
 def _extract_memory_usage_kb(stderr: str) -> tuple[int | None, str]:

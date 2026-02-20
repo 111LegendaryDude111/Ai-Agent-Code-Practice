@@ -40,6 +40,33 @@ class StaticAnalysisState(TypedDict):
     tool_errors: list[str]
 
 
+class RetryBranchState(TypedDict):
+    should_retry: bool
+    retries_used: int
+    retries_remaining: int
+    max_retries: int
+    reason: str
+
+
+class AdaptiveDifficultyBranchState(TypedDict):
+    action: str
+    current_difficulty: int
+    next_difficulty: int
+    reason: str
+
+
+class HintBranchState(TypedDict):
+    should_show_hint: bool
+    hints: list[str]
+
+
+class BranchingState(TypedDict):
+    retry: RetryBranchState
+    adaptive_difficulty: AdaptiveDifficultyBranchState
+    hint: HintBranchState
+    next_node: str
+
+
 class AgentState(TypedDict):
     user_id: str
     task_id: str
@@ -48,6 +75,8 @@ class AgentState(TypedDict):
     task_prompt: NotRequired[str]
     task_category: NotRequired[str]
     task_difficulty: NotRequired[int]
+    recommended_difficulty: NotRequired[int]
+    retry_count: NotRequired[int]
     test_cases: NotRequired[str]
     stdin_data: NotRequired[str]
     main_class_name: NotRequired[str]
@@ -58,6 +87,7 @@ class AgentState(TypedDict):
     llm_review: NotRequired[dict[str, object]]
     score_breakdown: NotRequired[dict[str, object]]
     skill_profile: NotRequired[dict[str, object]]
+    branching: NotRequired[BranchingState]
     final_score: NotRequired[float]
 
 
@@ -87,6 +117,8 @@ def validate_agent_state(state: Mapping[str, object]) -> AgentState:
     _validate_optional_string(normalized_state, "task_prompt")
     _validate_optional_string(normalized_state, "task_category")
     _validate_optional_positive_int(normalized_state, "task_difficulty")
+    _validate_optional_positive_int(normalized_state, "recommended_difficulty")
+    _validate_optional_non_negative_int(normalized_state, "retry_count")
     _validate_optional_dict(normalized_state, "llm_review")
     _validate_optional_dict(normalized_state, "score_breakdown")
     _validate_optional_dict(normalized_state, "skill_profile")
@@ -105,6 +137,8 @@ def validate_agent_state(state: Mapping[str, object]) -> AgentState:
         _validate_test_results_state(normalized_state["test_results"])
     if "static_analysis" in normalized_state:
         _validate_static_analysis_state(normalized_state["static_analysis"])
+    if "branching" in normalized_state:
+        _validate_branching_state(normalized_state["branching"])
 
     return cast(AgentState, normalized_state)
 
@@ -132,6 +166,15 @@ def _validate_optional_positive_int(state: dict[str, object], key: str) -> None:
     value = state[key]
     if not isinstance(value, int) or value < 1:
         raise AgentStateValidationError(f"state.{key} must be an integer >= 1 when present.")
+
+
+def _validate_optional_non_negative_int(state: dict[str, object], key: str) -> None:
+    if key not in state:
+        return
+
+    value = state[key]
+    if not isinstance(value, int) or value < 0:
+        raise AgentStateValidationError(f"state.{key} must be an integer >= 0 when present.")
 
 
 def _validate_execution_result_state(value: object) -> None:
@@ -211,6 +254,107 @@ def _validate_static_analysis_state(value: object) -> None:
         raise AgentStateValidationError("state.static_analysis.tool_errors must be a list.")
     if not all(isinstance(tool_error, str) for tool_error in tool_errors):
         raise AgentStateValidationError("state.static_analysis.tool_errors items must be strings.")
+
+
+def _validate_branching_state(value: object) -> None:
+    if not isinstance(value, dict):
+        raise AgentStateValidationError("state.branching must be an object.")
+
+    retry = value.get("retry")
+    if not isinstance(retry, dict):
+        raise AgentStateValidationError("state.branching.retry must be an object.")
+    _validate_required_field(retry, "should_retry", bool, "state.branching.retry.should_retry")
+    _validate_required_field(retry, "retries_used", int, "state.branching.retry.retries_used")
+    _validate_required_field(
+        retry,
+        "retries_remaining",
+        int,
+        "state.branching.retry.retries_remaining",
+    )
+    _validate_required_field(retry, "max_retries", int, "state.branching.retry.max_retries")
+    _validate_required_field(retry, "reason", str, "state.branching.retry.reason")
+
+    retries_used = retry["retries_used"]
+    retries_remaining = retry["retries_remaining"]
+    max_retries = retry["max_retries"]
+    if retries_used < 0:
+        raise AgentStateValidationError("state.branching.retry.retries_used must be >= 0.")
+    if retries_remaining < 0:
+        raise AgentStateValidationError("state.branching.retry.retries_remaining must be >= 0.")
+    if max_retries < 0:
+        raise AgentStateValidationError("state.branching.retry.max_retries must be >= 0.")
+    if retries_used > max_retries:
+        raise AgentStateValidationError(
+            "state.branching.retry.retries_used must be <= state.branching.retry.max_retries."
+        )
+    if retries_remaining > max_retries:
+        raise AgentStateValidationError(
+            "state.branching.retry.retries_remaining must be <= state.branching.retry.max_retries."
+        )
+
+    adaptive_difficulty = value.get("adaptive_difficulty")
+    if not isinstance(adaptive_difficulty, dict):
+        raise AgentStateValidationError("state.branching.adaptive_difficulty must be an object.")
+
+    _validate_required_field(
+        adaptive_difficulty,
+        "action",
+        str,
+        "state.branching.adaptive_difficulty.action",
+    )
+    _validate_required_field(
+        adaptive_difficulty,
+        "current_difficulty",
+        int,
+        "state.branching.adaptive_difficulty.current_difficulty",
+    )
+    _validate_required_field(
+        adaptive_difficulty,
+        "next_difficulty",
+        int,
+        "state.branching.adaptive_difficulty.next_difficulty",
+    )
+    _validate_required_field(
+        adaptive_difficulty,
+        "reason",
+        str,
+        "state.branching.adaptive_difficulty.reason",
+    )
+    if adaptive_difficulty["action"] not in {"increase", "decrease", "keep"}:
+        raise AgentStateValidationError(
+            "state.branching.adaptive_difficulty.action must be one of "
+            "'increase', 'decrease', or 'keep'."
+        )
+    if adaptive_difficulty["current_difficulty"] < 1:
+        raise AgentStateValidationError(
+            "state.branching.adaptive_difficulty.current_difficulty must be >= 1."
+        )
+    if adaptive_difficulty["next_difficulty"] < 1:
+        raise AgentStateValidationError(
+            "state.branching.adaptive_difficulty.next_difficulty must be >= 1."
+        )
+
+    hint = value.get("hint")
+    if not isinstance(hint, dict):
+        raise AgentStateValidationError("state.branching.hint must be an object.")
+    _validate_required_field(
+        hint,
+        "should_show_hint",
+        bool,
+        "state.branching.hint.should_show_hint",
+    )
+    hints = hint.get("hints")
+    if not isinstance(hints, list):
+        raise AgentStateValidationError("state.branching.hint.hints must be a list.")
+    if not all(isinstance(hint_item, str) for hint_item in hints):
+        raise AgentStateValidationError("state.branching.hint.hints items must be strings.")
+
+    next_node = value.get("next_node")
+    if next_node not in {"retry_submission", "retry_with_hint", "show_hint", "complete"}:
+        raise AgentStateValidationError(
+            "state.branching.next_node must be one of "
+            "'retry_submission', 'retry_with_hint', 'show_hint', or 'complete'."
+        )
 
 
 def _validate_required_field(

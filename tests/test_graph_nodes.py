@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 import unittest
 from typing import cast
 
 from interview_orchestrator.agent_state import AgentState
 from interview_orchestrator.sandbox_runner import SandboxExecutionResult
 from interview_orchestrator.state_steps import (
+    BranchingPolicy,
     GeneratedTask,
+    LangChainCloudLLMReviewer,
+    ScoreAggregationWeights,
+    branching_logic_node,
     generate_task_node,
     llm_review_node,
     run_full_graph_cycle,
@@ -24,6 +29,13 @@ from interview_orchestrator.test_runner import (
     PredefinedTestCaseResult,
     PredefinedTestRunResult,
 )
+
+
+def _parse_json_log_record(record: str) -> dict[str, object]:
+    parts = record.split(":", maxsplit=2)
+    if len(parts) != 3:
+        raise AssertionError(f"Unexpected log record format: {record!r}")
+    return cast(dict[str, object], json.loads(parts[2]))
 
 
 class StubTaskGenerator:
@@ -137,8 +149,63 @@ class StubLLMReviewer:
             "summary": "Structured review.",
             "strengths": ["Passes all tests."],
             "issues": [],
+            "improvement_suggestions": ["Add more edge-case coverage."],
+            "score_template": {
+                "correctness": 90.0,
+                "performance": 85.0,
+                "readability": 80.0,
+                "security": 95.0,
+                "final_score": 88.0,
+            },
             "score": 88.0,
             "reviewer": "stub",
+        }
+
+
+class MalformedFallbackLLMReviewer:
+    def review(self, state: AgentState) -> dict[str, object]:
+        return {
+            "summary": "  ",
+            "strengths": [""],
+            "issues": "not-a-list",
+            "improvement_suggestions": "not-a-list",
+            "score_template": {"correctness": "bad"},
+            "score": "not-a-number",
+        }
+
+
+class FlakyStructuredReviewChain:
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = responses
+        self.calls = 0
+
+    def invoke(self, payload: dict[str, object]) -> object:
+        _ = payload
+        self.calls += 1
+        if self.calls > len(self._responses):
+            raise RuntimeError("No response configured for this attempt.")
+
+        response = self._responses[self.calls - 1]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class TokenUsageStructuredReviewChain:
+    def invoke(self, payload: dict[str, object]) -> object:
+        _ = payload
+        return {
+            "review_payload": {
+                "summary": "Structured cloud review.",
+                "strengths": ["All tests passed."],
+                "issues": ["Minor naming issue."],
+                "score": 91.0,
+            },
+            "token_usage": {
+                "input_tokens": 120,
+                "output_tokens": 45,
+                "total_tokens": 165,
+            },
         }
 
 
@@ -158,6 +225,21 @@ class GraphNodesTests(unittest.TestCase):
         self.assertEqual(updated_state["task_category"], "math")
         self.assertEqual(updated_state["task_difficulty"], 2)
         self.assertIn('"input":"1 2\\n"', updated_state["test_cases"])
+
+    def test_generate_task_node_applies_recommended_difficulty(self) -> None:
+        updated_state = generate_task_node(
+            state={
+                "user_id": "42",
+                "task_id": "task-2",
+                "language": "python",
+                "code": "print(sum(map(int, input().split())))",
+                "task_difficulty": 2,
+                "recommended_difficulty": 3,
+            },
+            task_generator=StubTaskGenerator(),
+        )
+
+        self.assertEqual(updated_state["task_difficulty"], 3)
 
     def test_run_tests_node_writes_empty_payload_if_test_cases_missing(self) -> None:
         updated_state = run_tests_node(
@@ -209,14 +291,241 @@ class GraphNodesTests(unittest.TestCase):
         self.assertIn("llm_review", updated_state)
         self.assertIn("summary", updated_state["llm_review"])
         self.assertIn("score", updated_state["llm_review"])
+        self.assertIn("score_template", updated_state["llm_review"])
+        self.assertIn("improvement_suggestions", updated_state["llm_review"])
         llm_review = cast(dict[str, object], updated_state["llm_review"])
         llm_score = llm_review.get("score")
         self.assertIsInstance(llm_score, (int, float))
         if not isinstance(llm_score, int | float):
             self.fail("Expected numeric llm review score.")
         self.assertGreaterEqual(float(llm_score), 0.0)
+        self.assertIsInstance(llm_review.get("score_template"), dict)
+        self.assertIsInstance(llm_review.get("improvement_suggestions"), list)
 
-    def test_score_aggregation_node_writes_final_score_and_breakdown(self) -> None:
+    def test_langchain_cloud_llm_reviewer_retries_until_success(self) -> None:
+        chain = FlakyStructuredReviewChain(
+            responses=[
+                RuntimeError("temporary parsing failure"),
+                {
+                    "summary": "Structured cloud review.",
+                    "strengths": ["All tests passed."],
+                    "issues": ["Minor naming issue."],
+                    "score": 91.0,
+                },
+            ]
+        )
+
+        reviewer = LangChainCloudLLMReviewer(
+            api_key="test-key",
+            max_retries=2,
+            chain_factory=lambda: chain,
+        )
+        review = reviewer.review(
+            {
+                "user_id": "42",
+                "task_id": "task-1",
+                "language": "python",
+                "code": "print('ok')",
+            }
+        )
+
+        self.assertEqual(chain.calls, 2)
+        self.assertEqual(review["reviewer"], "langchain-cloud")
+        self.assertEqual(review["score"], 91.0)
+        self.assertEqual(review["summary"], "Structured cloud review.")
+        self.assertIn("score_template", review)
+        self.assertIn("improvement_suggestions", review)
+
+    def test_langchain_cloud_llm_reviewer_logs_token_usage(self) -> None:
+        reviewer = LangChainCloudLLMReviewer(
+            api_key="test-key",
+            chain_factory=lambda: TokenUsageStructuredReviewChain(),
+        )
+
+        with self.assertLogs("interview_orchestrator.pipeline", level="INFO") as captured:
+            review = reviewer.review(
+                {
+                    "user_id": "42",
+                    "task_id": "task-1",
+                    "language": "python",
+                    "code": "print('ok')",
+                }
+            )
+
+        self.assertEqual(review["reviewer"], "langchain-cloud")
+        payloads = [_parse_json_log_record(record) for record in captured.output]
+        token_usage_events = [
+            payload
+            for payload in payloads
+            if payload.get("event") == "submission.llm_review.token_usage"
+        ]
+        self.assertEqual(len(token_usage_events), 1)
+        token_usage = cast(dict[str, object], token_usage_events[0]["token_usage"])
+        self.assertEqual(token_usage["prompt_tokens"], 120)
+        self.assertEqual(token_usage["completion_tokens"], 45)
+        self.assertEqual(token_usage["total_tokens"], 165)
+
+    def test_langchain_cloud_llm_reviewer_returns_valid_json_after_failures(self) -> None:
+        chain = FlakyStructuredReviewChain(
+            responses=[
+                RuntimeError("provider timeout"),
+                RuntimeError("provider timeout"),
+            ]
+        )
+
+        reviewer = LangChainCloudLLMReviewer(
+            api_key="test-key",
+            max_retries=1,
+            fallback_reviewer=MalformedFallbackLLMReviewer(),
+            chain_factory=lambda: chain,
+        )
+        review = reviewer.review(
+            {
+                "user_id": "42",
+                "task_id": "task-1",
+                "language": "python",
+                "code": "print('ok')",
+            }
+        )
+
+        self.assertEqual(chain.calls, 2)
+        self.assertEqual(review["reviewer"], "heuristic_fallback")
+        self.assertIsInstance(review["summary"], str)
+        self.assertNotEqual(str(review["summary"]).strip(), "")
+        self.assertIsInstance(review["strengths"], list)
+        self.assertGreater(len(cast(list[object], review["strengths"])), 0)
+        self.assertIsInstance(review["issues"], list)
+        self.assertGreater(len(cast(list[object], review["issues"])), 0)
+        self.assertIsInstance(review["improvement_suggestions"], list)
+        self.assertGreater(len(cast(list[object], review["improvement_suggestions"])), 0)
+        self.assertIsInstance(review["score_template"], dict)
+        self.assertIsInstance(review["score"], (int, float))
+
+    def test_llm_review_node_uses_score_template_final_score_when_present(self) -> None:
+        class ScoreTemplateReviewer:
+            def review(self, state: AgentState) -> dict[str, object]:
+                _ = state
+                return {
+                    "summary": "Template-driven score.",
+                    "strengths": ["Covers core requirements."],
+                    "issues": ["Needs clearer naming."],
+                    "improvement_suggestions": ["Rename variables for readability."],
+                    "score_template": {
+                        "correctness": 84.0,
+                        "performance": 80.0,
+                        "readability": 70.0,
+                        "security": 90.0,
+                        "final_score": 82.5,
+                    },
+                    "score": 10.0,
+                    "reviewer": "template-reviewer",
+                }
+
+        updated_state = llm_review_node(
+            state={
+                "user_id": "42",
+                "task_id": "task-1",
+                "language": "python",
+                "code": "print('ok')",
+            },
+            llm_reviewer=ScoreTemplateReviewer(),
+        )
+
+        llm_review = cast(dict[str, object], updated_state["llm_review"])
+        self.assertEqual(llm_review["score"], 82.5)
+        score_template = cast(dict[str, object], llm_review["score_template"])
+        self.assertEqual(score_template["final_score"], 82.5)
+
+    def test_score_aggregation_node_writes_weighted_dimension_breakdown(self) -> None:
+        state: AgentState = {
+            "user_id": "42",
+            "task_id": "task-1",
+            "language": "python",
+            "code": "print('ok')",
+            "metrics": {
+                "runtime_ms": 120,
+                "memory_usage_kb": 1024,
+                "exit_code": 0,
+                "stdout": "ok\n",
+                "stderr": "",
+                "timed_out": False,
+            },
+            "test_results": {
+                "total": 4,
+                "passed": 3,
+                "failed": 1,
+                "first_failed_report": "Mismatch",
+                "case_results": [],
+            },
+            "static_analysis": {
+                "language": "python",
+                "pylint_score": 9.0,
+                "complexity_score": 3.0,
+                "security_warnings": [],
+                "security_warnings_summary": "No security warnings.",
+                "pylint_warnings": [],
+                "tool_errors": [],
+            },
+            "llm_review": {"score": 80.0},
+        }
+
+        updated_state = score_aggregation_node(state=state)
+        score_breakdown = cast(dict[str, object], updated_state["score_breakdown"])
+
+        self.assertEqual(updated_state["final_score"], 85.28)
+        self.assertEqual(score_breakdown["correctness_score"], 75.0)
+        self.assertEqual(score_breakdown["performance_score"], 100.0)
+        self.assertEqual(score_breakdown["readability_score"], 93.5)
+        self.assertEqual(score_breakdown["security_score"], 100.0)
+
+        weights = cast(dict[str, float], score_breakdown["weights"])
+        self.assertEqual(weights["correctness_weight"], 0.55)
+        self.assertEqual(weights["performance_weight"], 0.2)
+        self.assertEqual(weights["readability_weight"], 0.15)
+        self.assertEqual(weights["security_weight"], 0.1)
+
+    def test_score_aggregation_node_is_reproducible_for_same_signals(self) -> None:
+        base_state: AgentState = {
+            "user_id": "42",
+            "task_id": "task-1",
+            "language": "python",
+            "code": "print('ok')",
+            "metrics": {
+                "runtime_ms": 120,
+                "memory_usage_kb": 1024,
+                "exit_code": 0,
+                "stdout": "ok\n",
+                "stderr": "",
+                "timed_out": False,
+            },
+            "test_results": {
+                "total": 4,
+                "passed": 3,
+                "failed": 1,
+                "first_failed_report": "Mismatch",
+                "case_results": [],
+            },
+            "static_analysis": {
+                "language": "python",
+                "pylint_score": 9.0,
+                "complexity_score": 3.0,
+                "security_warnings": [],
+                "security_warnings_summary": "No security warnings.",
+                "pylint_warnings": [],
+                "tool_errors": [],
+            },
+            "llm_review": {"score": 5.0},
+        }
+        state_with_different_review = cast(AgentState, dict(base_state))
+        state_with_different_review["llm_review"] = {"score": 99.0}
+
+        first = score_aggregation_node(state=base_state)
+        second = score_aggregation_node(state=state_with_different_review)
+
+        self.assertEqual(first["final_score"], second["final_score"])
+        self.assertEqual(first["score_breakdown"], second["score_breakdown"])
+
+    def test_score_aggregation_node_supports_custom_dimension_weights(self) -> None:
         updated_state = score_aggregation_node(
             state={
                 "user_id": "42",
@@ -247,14 +556,16 @@ class GraphNodesTests(unittest.TestCase):
                     "pylint_warnings": [],
                     "tool_errors": [],
                 },
-                "llm_review": {"score": 80.0},
-            }
+            },
+            weights=ScoreAggregationWeights(
+                correctness_weight=1.0,
+                performance_weight=0.0,
+                readability_weight=0.0,
+                security_weight=0.0,
+            ),
         )
 
-        self.assertIn("final_score", updated_state)
-        self.assertIn("score_breakdown", updated_state)
-        self.assertGreaterEqual(float(updated_state["final_score"]), 0.0)
-        self.assertLessEqual(float(updated_state["final_score"]), 100.0)
+        self.assertEqual(updated_state["final_score"], 75.0)
 
     def test_update_profile_node_updates_language_scores(self) -> None:
         updated_state = update_profile_node(
@@ -276,6 +587,164 @@ class GraphNodesTests(unittest.TestCase):
         self.assertEqual(python_stats["attempts"], 1)
         self.assertEqual(python_stats["last_score"], 90.0)
         self.assertEqual(python_stats["best_score"], 90.0)
+        self.assertEqual(profile_map["failed_categories"], {})
+        self.assertEqual(
+            profile_map["complexity_mistakes"],
+            {"total": 0, "by_category": {}, "last_score": None},
+        )
+
+    def test_update_profile_node_tracks_failed_category_and_complexity_mistakes(self) -> None:
+        first_state = update_profile_node(
+            state={
+                "user_id": "42",
+                "task_id": "task-1",
+                "language": "python",
+                "code": "print('first')",
+                "task_category": "arrays",
+                "final_score": 40.0,
+                "test_results": {
+                    "total": 2,
+                    "passed": 0,
+                    "failed": 2,
+                    "first_failed_report": "Output mismatch.",
+                    "case_results": [],
+                },
+                "static_analysis": {
+                    "language": "python",
+                    "pylint_score": 6.0,
+                    "complexity_score": 9.1,
+                    "security_warnings": [],
+                    "security_warnings_summary": "No security warnings.",
+                    "pylint_warnings": [],
+                    "tool_errors": [],
+                },
+            }
+        )
+
+        second_state = update_profile_node(
+            state={
+                "user_id": "42",
+                "task_id": "task-2",
+                "language": "python",
+                "code": "print('second')",
+                "task_category": "arrays",
+                "final_score": 45.0,
+                "test_results": {
+                    "total": 3,
+                    "passed": 1,
+                    "failed": 2,
+                    "first_failed_report": "Edge case failed.",
+                    "case_results": [],
+                },
+                "static_analysis": {
+                    "language": "python",
+                    "pylint_score": 7.0,
+                    "complexity_score": 9.6,
+                    "security_warnings": [],
+                    "security_warnings_summary": "No security warnings.",
+                    "pylint_warnings": [],
+                    "tool_errors": [],
+                },
+                "skill_profile": cast(dict[str, object], first_state["skill_profile"]),
+            }
+        )
+
+        profile_map = cast(dict[str, object], second_state["skill_profile"])
+        failed_categories = cast(dict[str, int], profile_map["failed_categories"])
+        complexity_mistakes = cast(dict[str, object], profile_map["complexity_mistakes"])
+        by_category = cast(dict[str, int], complexity_mistakes["by_category"])
+
+        self.assertEqual(failed_categories["arrays"], 2)
+        self.assertEqual(complexity_mistakes["total"], 2)
+        self.assertEqual(by_category["arrays"], 2)
+        self.assertEqual(complexity_mistakes["last_score"], 9.6)
+
+    def test_branching_logic_node_routes_retry_with_hint_on_failure(self) -> None:
+        updated_state = branching_logic_node(
+            state={
+                "user_id": "42",
+                "task_id": "task-1",
+                "language": "python",
+                "code": "print('boom')",
+                "task_difficulty": 2,
+                "retry_count": 0,
+                "execution_result": {
+                    "exit_code": 1,
+                    "stdout": "",
+                    "stderr": "NameError: boom",
+                    "timed_out": False,
+                },
+                "test_results": {
+                    "total": 2,
+                    "passed": 0,
+                    "failed": 2,
+                    "first_failed_report": "Test case #1 failed. Reason: Output mismatch.",
+                    "case_results": [],
+                },
+                "llm_review": {
+                    "issues": ["Incorrect output formatting."],
+                },
+                "static_analysis": {
+                    "language": "python",
+                    "pylint_score": 4.0,
+                    "complexity_score": 7.0,
+                    "security_warnings": [],
+                    "security_warnings_summary": "No security warnings.",
+                    "pylint_warnings": [],
+                    "tool_errors": [],
+                },
+            },
+            policy=BranchingPolicy(max_retries=1, max_hints=3),
+        )
+
+        self.assertEqual(updated_state["retry_count"], 1)
+        self.assertEqual(updated_state["recommended_difficulty"], 2)
+        branching = cast(dict[str, object], updated_state["branching"])
+        self.assertEqual(branching["next_node"], "retry_with_hint")
+        retry = cast(dict[str, object], branching["retry"])
+        self.assertEqual(retry["should_retry"], True)
+        self.assertEqual(retry["retries_used"], 1)
+        hint = cast(dict[str, object], branching["hint"])
+        self.assertEqual(hint["should_show_hint"], True)
+        hints = cast(list[str], hint["hints"])
+        self.assertGreater(len(hints), 0)
+
+    def test_branching_logic_node_increases_difficulty_on_high_score_streak(self) -> None:
+        updated_state = branching_logic_node(
+            state={
+                "user_id": "42",
+                "task_id": "task-1",
+                "language": "python",
+                "code": "print('ok')",
+                "task_difficulty": 2,
+                "retry_count": 1,
+                "execution_result": {
+                    "exit_code": 0,
+                    "stdout": "ok\n",
+                    "stderr": "",
+                    "timed_out": False,
+                },
+                "test_results": {
+                    "total": 2,
+                    "passed": 2,
+                    "failed": 0,
+                    "first_failed_report": None,
+                    "case_results": [],
+                },
+                "skill_profile": {
+                    "recent_scores": [90.0, 92.0, 95.0],
+                },
+            }
+        )
+
+        branching = cast(dict[str, object], updated_state["branching"])
+        adaptive = cast(dict[str, object], branching["adaptive_difficulty"])
+        self.assertEqual(adaptive["action"], "increase")
+        self.assertEqual(adaptive["current_difficulty"], 2)
+        self.assertEqual(adaptive["next_difficulty"], 3)
+        self.assertEqual(updated_state["recommended_difficulty"], 3)
+        self.assertEqual(updated_state["retry_count"], 0)
+        self.assertEqual(branching["next_node"], "complete")
 
     def test_run_full_graph_cycle_completes_without_failures(self) -> None:
         final_state = run_full_graph_cycle(
@@ -300,6 +769,30 @@ class GraphNodesTests(unittest.TestCase):
         self.assertIn("score_breakdown", final_state)
         self.assertIn("final_score", final_state)
         self.assertIn("skill_profile", final_state)
+        self.assertIn("branching", final_state)
+        self.assertIn("recommended_difficulty", final_state)
+
+    def test_run_full_graph_cycle_emits_structured_submission_logs(self) -> None:
+        with self.assertLogs("interview_orchestrator.pipeline", level="INFO") as captured:
+            _ = run_full_graph_cycle(
+                state={
+                    "user_id": "42",
+                    "task_id": "task-structured-logs",
+                    "language": "python",
+                    "code": "print(sum(map(int, input().split())))",
+                },
+                task_generator=StubTaskGenerator(),
+                sandbox_executor=StubSandboxExecutor(),
+                test_runner=StubTestRunner(),
+                static_analyzer=StubStaticAnalyzer(),
+                llm_reviewer=StubLLMReviewer(),
+            )
+
+        payloads = [_parse_json_log_record(record) for record in captured.output]
+        events = [str(payload.get("event")) for payload in payloads]
+        self.assertIn("submission.pipeline.started", events)
+        self.assertIn("submission.pipeline.completed", events)
+        self.assertGreaterEqual(events.count("submission.pipeline.step_completed"), 8)
 
 
 if __name__ == "__main__":

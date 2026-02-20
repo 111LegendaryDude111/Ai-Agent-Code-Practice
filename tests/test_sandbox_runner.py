@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -7,6 +8,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from interview_orchestrator.sandbox_runner import DockerSandboxRunner, SandboxLimits
+
+
+def _parse_json_log_record(record: str) -> dict[str, object]:
+    parts = record.split(":", maxsplit=2)
+    if len(parts) != 3:
+        raise AssertionError(f"Unexpected log record format: {record!r}")
+    return json.loads(parts[2])
 
 
 class DockerSandboxRunnerTests(unittest.TestCase):
@@ -125,6 +133,41 @@ class DockerSandboxRunnerTests(unittest.TestCase):
         cleanup_command = subprocess_run_mock.call_args_list[-1].args[0]
         container_name = run_command[run_command.index("--name") + 1]
         self.assertEqual(cleanup_command[3], container_name)
+
+    @patch("interview_orchestrator.sandbox_runner.subprocess.run")
+    def test_execute_logs_sandbox_crash_when_docker_cli_is_missing(
+        self,
+        subprocess_run_mock: Mock,
+    ) -> None:
+        subprocess_run_mock.side_effect = [
+            FileNotFoundError(),
+            subprocess.CompletedProcess(
+                args=["docker", "rm", "-f", "container"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
+
+        runner = DockerSandboxRunner()
+        with self.assertLogs("interview_orchestrator.sandbox", level="ERROR") as captured:
+            result = runner.execute(
+                language="python",
+                source_code="print('ok')",
+                limits=SandboxLimits(timeout_seconds=1.0),
+            )
+
+        self.assertIsNone(result.exit_code)
+        self.assertEqual(result.stderr, "Docker CLI was not found in PATH.")
+        payloads = [_parse_json_log_record(record) for record in captured.output]
+        has_crash_event = any(
+            payload.get("event") == "sandbox.execution.crashed" for payload in payloads
+        )
+        has_missing_docker_type = any(
+            payload.get("crash_type") == "docker_cli_missing" for payload in payloads
+        )
+        self.assertTrue(has_crash_event)
+        self.assertTrue(has_missing_docker_type)
 
     @patch("interview_orchestrator.sandbox_runner.subprocess.run")
     def test_execute_uses_single_read_only_mount_from_tempdir(

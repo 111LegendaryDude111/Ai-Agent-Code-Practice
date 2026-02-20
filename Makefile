@@ -59,10 +59,10 @@ lint:
 
 format:
 	@if [ -x "$(BIN)/pre-commit" ]; then \
-		for hook in ruff ruff-format black; do \
+		for hook in ruff black; do \
 			$(BIN)/pre-commit run $$hook --all-files || true; \
 		done; \
-		for hook in ruff ruff-format black; do \
+		for hook in ruff black; do \
 			$(BIN)/pre-commit run $$hook --all-files; \
 		done; \
 	else \
@@ -75,7 +75,6 @@ format:
 			exit 1; \
 		fi; \
 		$(BIN)/ruff check --fix .; \
-		$(BIN)/ruff format .; \
 		$(BIN)/black .; \
 	fi
 
