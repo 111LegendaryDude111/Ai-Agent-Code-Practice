@@ -434,3 +434,56 @@
 - `tests.test_graph_nodes.GraphNodesTests.test_llm_review_node_falls_back_when_reviewer_raises`
 - `tests.test_graph_nodes.GraphNodesTests.test_run_full_graph_cycle_recovers_from_partial_failures`
 - `tests.test_sandbox_runner.DockerSandboxRunnerTests.test_execute_recovers_when_command_building_crashes`
+
+---
+
+# EPIC 16 — E2E Pipeline Integration & Result Delivery
+
+## 16.1 Bot-to-Orchestrator Full Cycle
+
+**Tasks:**
+
+- Запускать `run_full_graph_cycle(...)` после успешного сохранения submission в bot flow
+- Формировать валидный `AgentState` из данных пользователя, языка, кода и контекста задачи
+- Возвращать пользователю итог обработки (status/score/next step) в Telegram
+- Обрабатывать recoverable ошибки оркестрации без падения bot process
+
+**DoD:**
+
+- Каждый сохраненный submission инициирует полный orchestration cycle
+- Пользователь получает ответ с результатом обработки в рамках того же interaction flow
+- При частичных сбоях (sandbox/LLM/review) бот отдает детерминированный fallback-ответ
+
+---
+
+## 16.2 Persistence of Orchestration Outputs
+
+**Tasks:**
+
+- Сохранять `execution_result`/`metrics` в `submission_metrics`
+- Сохранять `static_analysis` в `submission_static_analysis`
+- Добавить хранение review/scoring/branching артефактов (`llm_review`, `score_breakdown`, `final_score`, `branching`, `recommended_difficulty`) в отдельном repository-backed storage
+- Гарантировать идемпотентную запись результатов и корректное обновление при ретраях
+
+**DoD:**
+
+- По завершению pipeline все ключевые артефакты submission доступны из БД
+- Persist-путь работает как для success, так и для fallback/rate-limited сценариев
+- Есть unit/integration тесты на сохранение и чтение orchestration результатов
+
+---
+
+## 16.3 User-Facing Failure Reporting
+
+**Tasks:**
+
+- Преобразовать `first_failed_report`, `output_diff`, sandbox stderr и runtime signals в понятный user message
+- Показывать конкретную причину падения (timeout/runtime error/output mismatch) и первый failing case
+- Добавить краткие actionable hints из branching/LLM review
+- Ограничить объем сообщения под Telegram delivery constraints
+
+**DoD:**
+
+- Пользователь видит причину падения submission, а не только факт сохранения кода
+- Для mismatch-сценариев показывается diff/expected-vs-actual контекст
+- Для success-сценария приходит краткое резюме (score + next action/recommended difficulty)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from collections.abc import Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,17 @@ class SubmissionStaticAnalysisRecord:
     complexity_score: float | None
     security_warnings: list[dict[str, object]]
     pylint_warnings: list[dict[str, object]]
+    created_at: str
+
+
+@dataclass(frozen=True)
+class SubmissionOrchestrationRecord:
+    submission_id: int
+    llm_review: dict[str, object]
+    score_breakdown: dict[str, object]
+    final_score: float | None
+    branching: dict[str, object]
+    recommended_difficulty: int | None
     created_at: str
 
 
@@ -343,6 +355,51 @@ FROM submission_static_analysis
 WHERE submission_id = ?;
 """
 
+CREATE_SUBMISSION_ORCHESTRATION_TABLE_SQLITE_SQL = """
+CREATE TABLE IF NOT EXISTS submission_orchestration_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    submission_id INTEGER NOT NULL UNIQUE,
+    llm_review TEXT NOT NULL DEFAULT '{}',
+    score_breakdown TEXT NOT NULL DEFAULT '{}',
+    final_score REAL,
+    branching TEXT NOT NULL DEFAULT '{}',
+    recommended_difficulty INTEGER,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (submission_id) REFERENCES submissions(id) ON DELETE CASCADE
+);
+"""
+
+INSERT_SUBMISSION_ORCHESTRATION_SQLITE_SQL = """
+INSERT INTO submission_orchestration_artifacts (
+    submission_id,
+    llm_review,
+    score_breakdown,
+    final_score,
+    branching,
+    recommended_difficulty
+)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(submission_id) DO UPDATE SET
+    llm_review = excluded.llm_review,
+    score_breakdown = excluded.score_breakdown,
+    final_score = excluded.final_score,
+    branching = excluded.branching,
+    recommended_difficulty = excluded.recommended_difficulty;
+"""
+
+SELECT_SUBMISSION_ORCHESTRATION_SQLITE_SQL = """
+SELECT
+    submission_id,
+    llm_review,
+    score_breakdown,
+    final_score,
+    branching,
+    recommended_difficulty,
+    created_at
+FROM submission_orchestration_artifacts
+WHERE submission_id = ?;
+"""
+
 CREATE_SUBMISSIONS_TABLE_POSTGRES_SQL = """
 CREATE TABLE IF NOT EXISTS submissions (
     id BIGSERIAL PRIMARY KEY,
@@ -444,6 +501,50 @@ FROM submission_static_analysis
 WHERE submission_id = %s;
 """
 
+CREATE_SUBMISSION_ORCHESTRATION_TABLE_POSTGRES_SQL = """
+CREATE TABLE IF NOT EXISTS submission_orchestration_artifacts (
+    id BIGSERIAL PRIMARY KEY,
+    submission_id BIGINT NOT NULL UNIQUE REFERENCES submissions(id) ON DELETE CASCADE,
+    llm_review JSONB NOT NULL DEFAULT '{}'::jsonb,
+    score_breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
+    final_score DOUBLE PRECISION,
+    branching JSONB NOT NULL DEFAULT '{}'::jsonb,
+    recommended_difficulty INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+INSERT_SUBMISSION_ORCHESTRATION_POSTGRES_SQL = """
+INSERT INTO submission_orchestration_artifacts (
+    submission_id,
+    llm_review,
+    score_breakdown,
+    final_score,
+    branching,
+    recommended_difficulty
+)
+VALUES (%s, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s)
+ON CONFLICT (submission_id) DO UPDATE SET
+    llm_review = EXCLUDED.llm_review,
+    score_breakdown = EXCLUDED.score_breakdown,
+    final_score = EXCLUDED.final_score,
+    branching = EXCLUDED.branching,
+    recommended_difficulty = EXCLUDED.recommended_difficulty;
+"""
+
+SELECT_SUBMISSION_ORCHESTRATION_POSTGRES_SQL = """
+SELECT
+    submission_id,
+    llm_review::text,
+    score_breakdown::text,
+    final_score,
+    branching::text,
+    recommended_difficulty,
+    created_at
+FROM submission_orchestration_artifacts
+WHERE submission_id = %s;
+"""
+
 ALTER_SUBMISSIONS_TABLE_POSTGRES_ADD_TASK_ID_SQL = """
 ALTER TABLE submissions
 ADD COLUMN IF NOT EXISTS task_id BIGINT;
@@ -497,6 +598,16 @@ ON submission_static_analysis(submission_id);
 CREATE_SUBMISSION_STATIC_ANALYSIS_CREATED_AT_INDEX_SQLITE_SQL = """
 CREATE INDEX IF NOT EXISTS idx_submission_static_analysis_created_at
 ON submission_static_analysis(created_at);
+"""
+
+CREATE_SUBMISSION_ORCHESTRATION_SUBMISSION_ID_INDEX_SQLITE_SQL = """
+CREATE INDEX IF NOT EXISTS idx_submission_orchestration_artifacts_submission_id
+ON submission_orchestration_artifacts(submission_id);
+"""
+
+CREATE_SUBMISSION_ORCHESTRATION_CREATED_AT_INDEX_SQLITE_SQL = """
+CREATE INDEX IF NOT EXISTS idx_submission_orchestration_artifacts_created_at
+ON submission_orchestration_artifacts(created_at);
 """
 
 CREATE_TASKS_TABLE_POSTGRES_SQL = """
@@ -632,6 +743,16 @@ CREATE INDEX IF NOT EXISTS idx_submission_static_analysis_created_at
 ON submission_static_analysis(created_at);
 """
 
+CREATE_SUBMISSION_ORCHESTRATION_SUBMISSION_ID_INDEX_POSTGRES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_submission_orchestration_artifacts_submission_id
+ON submission_orchestration_artifacts(submission_id);
+"""
+
+CREATE_SUBMISSION_ORCHESTRATION_CREATED_AT_INDEX_POSTGRES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_submission_orchestration_artifacts_created_at
+ON submission_orchestration_artifacts(created_at);
+"""
+
 SELECT_PREFERRED_LANGUAGE_POSTGRES_SQL = """
 SELECT preferred_language
 FROM users
@@ -719,6 +840,21 @@ class UserRepository(Protocol):
         self,
         submission_id: int,
     ) -> SubmissionStaticAnalysisRecord | None: ...
+
+    async def save_submission_orchestration_artifacts(
+        self,
+        submission_id: int,
+        llm_review: dict[str, object],
+        score_breakdown: dict[str, object],
+        final_score: float | None,
+        branching: dict[str, object],
+        recommended_difficulty: int | None,
+    ) -> bool: ...
+
+    async def get_submission_orchestration_artifacts(
+        self,
+        submission_id: int,
+    ) -> SubmissionOrchestrationRecord | None: ...
 
     async def create_task(
         self,
@@ -852,6 +988,34 @@ class SQLiteUserRepository:
     ) -> SubmissionStaticAnalysisRecord | None:
         return await asyncio.to_thread(self._get_submission_static_analysis_sync, submission_id)
 
+    async def save_submission_orchestration_artifacts(
+        self,
+        submission_id: int,
+        llm_review: dict[str, object],
+        score_breakdown: dict[str, object],
+        final_score: float | None,
+        branching: dict[str, object],
+        recommended_difficulty: int | None,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._save_submission_orchestration_artifacts_sync,
+            submission_id,
+            llm_review,
+            score_breakdown,
+            final_score,
+            branching,
+            recommended_difficulty,
+        )
+
+    async def get_submission_orchestration_artifacts(
+        self,
+        submission_id: int,
+    ) -> SubmissionOrchestrationRecord | None:
+        return await asyncio.to_thread(
+            self._get_submission_orchestration_artifacts_sync,
+            submission_id,
+        )
+
     async def create_task(
         self,
         language: str,
@@ -960,6 +1124,18 @@ class SQLiteUserRepository:
                 self._mark_sqlite_migration_applied(
                     connection,
                     "0009_create_submission_static_analysis",
+                )
+
+            if not self._is_sqlite_migration_applied(
+                connection,
+                "0010_create_submission_orchestration_artifacts",
+            ):
+                connection.execute(CREATE_SUBMISSION_ORCHESTRATION_TABLE_SQLITE_SQL)
+                connection.execute(CREATE_SUBMISSION_ORCHESTRATION_SUBMISSION_ID_INDEX_SQLITE_SQL)
+                connection.execute(CREATE_SUBMISSION_ORCHESTRATION_CREATED_AT_INDEX_SQLITE_SQL)
+                self._mark_sqlite_migration_applied(
+                    connection,
+                    "0010_create_submission_orchestration_artifacts",
                 )
 
             connection.execute(
@@ -1155,6 +1331,53 @@ class SQLiteUserRepository:
 
         return _row_to_submission_static_analysis(tuple(row))
 
+    def _save_submission_orchestration_artifacts_sync(
+        self,
+        submission_id: int,
+        llm_review: dict[str, object],
+        score_breakdown: dict[str, object],
+        final_score: float | None,
+        branching: dict[str, object],
+        recommended_difficulty: int | None,
+    ) -> bool:
+        with closing(sqlite3.connect(self._database_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON;")
+            submission = connection.execute(
+                SELECT_SUBMISSION_EXISTS_SQLITE_SQL,
+                (submission_id,),
+            ).fetchone()
+            if submission is None:
+                return False
+
+            cursor = connection.execute(
+                INSERT_SUBMISSION_ORCHESTRATION_SQLITE_SQL,
+                (
+                    submission_id,
+                    _encode_json_object_payload(llm_review),
+                    _encode_json_object_payload(score_breakdown),
+                    final_score,
+                    _encode_json_object_payload(branching),
+                    recommended_difficulty,
+                ),
+            )
+            connection.commit()
+        return cursor.rowcount >= 1
+
+    def _get_submission_orchestration_artifacts_sync(
+        self,
+        submission_id: int,
+    ) -> SubmissionOrchestrationRecord | None:
+        with closing(sqlite3.connect(self._database_path)) as connection:
+            row = connection.execute(
+                SELECT_SUBMISSION_ORCHESTRATION_SQLITE_SQL,
+                (submission_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return _row_to_submission_orchestration(tuple(row))
+
     def _create_task_sync(
         self,
         language: str,
@@ -1297,6 +1520,14 @@ class PostgresUserRepository:
                 CREATE_SUBMISSION_STATIC_ANALYSIS_TABLE_POSTGRES_SQL,
                 CREATE_SUBMISSION_STATIC_ANALYSIS_SUBMISSION_ID_INDEX_POSTGRES_SQL,
                 CREATE_SUBMISSION_STATIC_ANALYSIS_CREATED_AT_INDEX_POSTGRES_SQL,
+            ),
+        )
+        await self._apply_postgres_migration(
+            "0010_create_submission_orchestration_artifacts",
+            (
+                CREATE_SUBMISSION_ORCHESTRATION_TABLE_POSTGRES_SQL,
+                CREATE_SUBMISSION_ORCHESTRATION_SUBMISSION_ID_INDEX_POSTGRES_SQL,
+                CREATE_SUBMISSION_ORCHESTRATION_CREATED_AT_INDEX_POSTGRES_SQL,
             ),
         )
         await self._execute(BOOTSTRAP_USERS_SKILL_PROFILE_POSTGRES_SQL)
@@ -1455,6 +1686,44 @@ class PostgresUserRepository:
         if row is None:
             return None
         return _row_to_submission_static_analysis(row)
+
+    async def save_submission_orchestration_artifacts(
+        self,
+        submission_id: int,
+        llm_review: dict[str, object],
+        score_breakdown: dict[str, object],
+        final_score: float | None,
+        branching: dict[str, object],
+        recommended_difficulty: int | None,
+    ) -> bool:
+        submission = await self._fetch_one(SELECT_SUBMISSION_EXISTS_POSTGRES_SQL, (submission_id,))
+        if submission is None:
+            return False
+
+        status = await self._execute(
+            INSERT_SUBMISSION_ORCHESTRATION_POSTGRES_SQL,
+            (
+                submission_id,
+                _encode_json_object_payload(llm_review),
+                _encode_json_object_payload(score_breakdown),
+                final_score,
+                _encode_json_object_payload(branching),
+                recommended_difficulty,
+            ),
+        )
+        return status in {"INSERT 0 1", "UPDATE 1"}
+
+    async def get_submission_orchestration_artifacts(
+        self,
+        submission_id: int,
+    ) -> SubmissionOrchestrationRecord | None:
+        row = await self._fetch_one(
+            SELECT_SUBMISSION_ORCHESTRATION_POSTGRES_SQL,
+            (submission_id,),
+        )
+        if row is None:
+            return None
+        return _row_to_submission_orchestration(row)
 
     async def create_task(
         self,
@@ -1663,8 +1932,37 @@ def _row_to_submission_static_analysis(
     )
 
 
+def _row_to_submission_orchestration(
+    row: tuple[object, ...],
+) -> SubmissionOrchestrationRecord:
+    return SubmissionOrchestrationRecord(
+        submission_id=_coerce_int(row[0], "submission_orchestration_artifacts.submission_id"),
+        llm_review=_decode_json_object_payload(row[1]),
+        score_breakdown=_decode_json_object_payload(row[2]),
+        final_score=(
+            _coerce_float(row[3], "submission_orchestration_artifacts.final_score")
+            if row[3] is not None
+            else None
+        ),
+        branching=_decode_json_object_payload(row[4]),
+        recommended_difficulty=(
+            _coerce_int(
+                row[5],
+                "submission_orchestration_artifacts.recommended_difficulty",
+            )
+            if row[5] is not None
+            else None
+        ),
+        created_at=str(row[6]),
+    )
+
+
 def _encode_json_payload(value: list[dict[str, object]]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _encode_json_object_payload(value: Mapping[str, object]) -> str:
+    return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
 
 
 def _decode_json_array_payload(value: object) -> list[dict[str, object]]:
@@ -1685,6 +1983,21 @@ def _decode_json_array_payload(value: object) -> list[dict[str, object]]:
             continue
         normalized_items.append({str(key): item[key] for key in item})
     return normalized_items
+
+
+def _decode_json_object_payload(value: object) -> dict[str, object]:
+    if value is None:
+        return {}
+
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError:
+        return {}
+
+    if not isinstance(parsed, dict):
+        return {}
+
+    return {str(key): parsed[key] for key in parsed}
 
 
 def _decode_skill_profile(value: object) -> dict[str, object] | None:

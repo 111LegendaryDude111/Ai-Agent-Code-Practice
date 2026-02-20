@@ -350,6 +350,84 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_saved)
         self.assertIsNone(analysis)
 
+    async def test_save_submission_orchestration_artifacts_persists_and_updates(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            database_path = Path(tmp_dir) / "bot.db"
+            repository = SQLiteUserRepository(str(database_path))
+
+            await repository.ensure_schema()
+            await repository.register_user(telegram_id=1002)
+            await repository.set_preferred_language(
+                telegram_id=1002,
+                preferred_language="python",
+            )
+            submission_id = await repository.save_submission_with_id(
+                telegram_id=1002,
+                code="print('orchestration')",
+            )
+
+            self.assertIsNotNone(submission_id)
+            if submission_id is None:
+                self.fail("Expected saved submission id.")
+
+            first_save = await repository.save_submission_orchestration_artifacts(
+                submission_id=submission_id,
+                llm_review={"reviewer": "heuristic", "score": 71.0},
+                score_breakdown={
+                    "correctness_score": 70.0,
+                    "performance_score": 80.0,
+                },
+                final_score=71.0,
+                branching={"next_node": "retry_submission"},
+                recommended_difficulty=1,
+            )
+            second_save = await repository.save_submission_orchestration_artifacts(
+                submission_id=submission_id,
+                llm_review={"reviewer": "heuristic_rate_limited", "score": 84.5},
+                score_breakdown={
+                    "correctness_score": 90.0,
+                    "performance_score": 75.0,
+                },
+                final_score=84.5,
+                branching={"next_node": "complete"},
+                recommended_difficulty=2,
+            )
+            artifacts = await repository.get_submission_orchestration_artifacts(submission_id)
+
+        self.assertTrue(first_save)
+        self.assertTrue(second_save)
+        self.assertIsNotNone(artifacts)
+        if artifacts is None:
+            self.fail("Expected orchestration artifacts row.")
+        self.assertEqual(artifacts.submission_id, submission_id)
+        self.assertEqual(artifacts.llm_review.get("reviewer"), "heuristic_rate_limited")
+        self.assertEqual(artifacts.llm_review.get("score"), 84.5)
+        self.assertEqual(artifacts.score_breakdown.get("correctness_score"), 90.0)
+        self.assertEqual(artifacts.final_score, 84.5)
+        self.assertEqual(artifacts.branching.get("next_node"), "complete")
+        self.assertEqual(artifacts.recommended_difficulty, 2)
+
+    async def test_save_submission_orchestration_artifacts_requires_existing_submission(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            database_path = Path(tmp_dir) / "bot.db"
+            repository = SQLiteUserRepository(str(database_path))
+
+            await repository.ensure_schema()
+            is_saved = await repository.save_submission_orchestration_artifacts(
+                submission_id=404,
+                llm_review={"reviewer": "heuristic"},
+                score_breakdown={},
+                final_score=None,
+                branching={},
+                recommended_difficulty=None,
+            )
+            artifacts = await repository.get_submission_orchestration_artifacts(404)
+
+        self.assertFalse(is_saved)
+        self.assertIsNone(artifacts)
+
     async def test_ensure_schema_migrates_existing_users_table(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             database_path = Path(tmp_dir) / "bot.db"
@@ -401,6 +479,10 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' "
                     "AND name = 'submission_static_analysis';"
                 ).fetchone()
+                orchestration_table_exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'submission_orchestration_artifacts';"
+                ).fetchone()
 
         user_count = row[0] if row is not None else 0
         migration_count = migration_count_row[0] if migration_count_row is not None else 0
@@ -410,8 +492,9 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(task_table_exists)
         self.assertIsNotNone(metrics_table_exists)
         self.assertIsNotNone(static_analysis_table_exists)
+        self.assertIsNotNone(orchestration_table_exists)
         self.assertEqual(user_count, 1)
-        self.assertGreaterEqual(migration_count, 9)
+        self.assertGreaterEqual(migration_count, 10)
         self.assertIsNotNone(skill_profile_row)
         if skill_profile_row is None:
             self.fail("Expected migrated skill profile value.")
@@ -495,6 +578,7 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 "0007_add_skill_profile",
                 "0008_create_submission_metrics",
                 "0009_create_submission_static_analysis",
+                "0010_create_submission_orchestration_artifacts",
             },
         )
         self.assertIn("idx_users_created_at", index_names)
@@ -506,6 +590,8 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("idx_submission_metrics_created_at", index_names)
         self.assertIn("idx_submission_static_analysis_submission_id", index_names)
         self.assertIn("idx_submission_static_analysis_created_at", index_names)
+        self.assertIn("idx_submission_orchestration_artifacts_submission_id", index_names)
+        self.assertIn("idx_submission_orchestration_artifacts_created_at", index_names)
 
     def test_build_repository_from_sqlite_url(self) -> None:
         repository = build_user_repository("sqlite:///:memory:")

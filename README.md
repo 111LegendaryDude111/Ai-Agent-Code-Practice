@@ -23,7 +23,7 @@ Monorepo foundation for the project described in `PDR.md`.
 ### Bot (`apps/bot/src/interview_bot`)
 
 - `main.py` - aiogram handlers (`/start`, выбор языка, валидация и прием submission).
-- `user_repository.py` - слой доступа к БД (SQLite/Postgres), миграции, CRUD для пользователей, задач, submissions, metrics, static analysis.
+- `user_repository.py` - слой доступа к БД (SQLite/Postgres), миграции, CRUD для пользователей, задач, submissions, metrics, static analysis, orchestration artifacts.
 
 ### Orchestrator (`services/orchestrator/src/interview_orchestrator`)
 

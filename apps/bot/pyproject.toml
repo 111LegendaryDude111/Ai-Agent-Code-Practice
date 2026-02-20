@@ -10,6 +10,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "aiogram>=3.15.0,<4.0.0",
     "interview-common>=0.1.0",
+    "interview-orchestrator>=0.1.0",
     "psycopg[binary]>=3.2.6,<4.0.0",
 ]
 
@@ -24,3 +25,4 @@ where = ["src"]
 
 [tool.uv.sources]
 interview-common = { workspace = true }
+interview-orchestrator = { workspace = true }
