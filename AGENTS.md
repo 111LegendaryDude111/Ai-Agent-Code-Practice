@@ -8,25 +8,29 @@ Goal: implement features quickly without breaking the bot/orchestrator pipeline.
 ## Project Map
 
 - `apps/bot/src/interview_bot`
-  Telegram bot (`aiogram`), user registration, language selection, submission intake.
+  Telegram bot (`aiogram`), user registration, language selection, submission intake, rate limiting.
 - `services/orchestrator/src/interview_orchestrator`
-  Pipeline/state graph nodes, sandbox execution, predefined tests, static analysis, scoring.
+  Pipeline/state graph nodes, sandbox execution, predefined tests, static analysis, LLM review, scoring, offline evaluation dataset.
 - `libs/common/src/interview_common`
-  Shared settings and `.env` loading.
+  Shared settings and `.env` loading (including rate-limit configuration).
 - `sandbox/{python,go,java,cpp}`
   Per-language Docker templates and runtime scripts.
+- `sandbox/seccomp/sandbox-seccomp.json`
+  Seccomp profile used by sandbox containers.
 - `tests`
-  Unit tests for bot repository, state validation, graph nodes, sandbox/test/static-analysis behavior.
+  Unit tests for bot repository, state validation, graph nodes, sandbox/test/static-analysis behavior, offline dataset consistency.
 
 ## Core Architecture Constraints
 
 1. Keep `AgentState` as the single contract across graph nodes.
 2. Validate state at node boundaries via `validate_agent_state(...)`.
 3. Preserve the graph order:
-   `GenerateTask -> ExecuteSandbox -> RunTests -> StaticAnalysis -> LLMReview -> ScoreAggregation -> UpdateProfile`.
+   `GenerateTask -> ExecuteSandbox -> RunTests -> StaticAnalysis -> LLMReview -> ScoreAggregation -> UpdateProfile -> BranchingLogic`.
 4. Keep sandbox isolation defaults:
-   no network, memory/CPU/time limits, read-only rootfs, container cleanup.
+   no network, memory/CPU/time limits, read-only rootfs, seccomp profile, container cleanup.
 5. Keep user-facing Telegram messages in Russian unless explicitly asked to change locale behavior.
+6. Keep partial-failure behavior graceful:
+   LLM failures/rate limits and sandbox crashes should return deterministic state/result payloads instead of crashing the full cycle.
 
 ## LLM Review Contract (EPIC 8.2)
 
@@ -43,6 +47,19 @@ Goal: implement features quickly without breaking the bot/orchestrator pipeline.
 4. If `score_template` is present in reviewer payload, `score` must match `score_template.final_score`.
 5. Do not bypass `_normalize_llm_review_payload(...)` when writing `state["llm_review"]`.
 6. Keep prompt shape aligned with deterministic templates in `LangChainCloudLLMReviewer`.
+7. Preserve graceful degradation:
+   - cloud failure path -> `reviewer = "heuristic_fallback"`
+   - LLM rate-limit path -> `reviewer = "heuristic_rate_limited"`
+8. Keep `observability_metrics` computed in `llm_review_node` (including fallback/rate-limited paths).
+
+## Rate Limiting & Reliability Contract (EPIC 14/15)
+
+1. Keep bot submission throttling via repository-backed recent submission counting.
+2. Keep LLM call throttling in orchestrator via rate limiter abstraction (default in-memory limiter).
+3. Keep sandbox crash recovery behavior in `DockerSandboxRunner.execute(...)`:
+   return `SandboxExecutionResult` with diagnostics and always attempt cleanup in `finally`.
+4. Do not turn recoverable execution/review errors into unhandled exceptions in `run_full_graph_cycle(...)`.
+5. Preserve structured logging for failure/recovery paths (`submission.llm_review.*`, `sandbox.execution.*`).
 
 ## Working Rules
 
@@ -60,6 +77,7 @@ Goal: implement features quickly without breaking the bot/orchestrator pipeline.
 - Graph nodes: `services/orchestrator/src/interview_orchestrator/state_steps.py`
 - Sandbox executor: `services/orchestrator/src/interview_orchestrator/sandbox_runner.py`
 - Static analysis: `services/orchestrator/src/interview_orchestrator/static_analysis.py`
+- Offline dataset evaluation: `services/orchestrator/src/interview_orchestrator/evaluation_dataset.py`
 
 ## Local Commands
 
@@ -74,11 +92,14 @@ Goal: implement features quickly without breaking the bot/orchestrator pipeline.
    - `PYTHONPATH=libs/common/src:apps/bot/src:services/orchestrator/src .venv/bin/python -m unittest tests.test_graph_nodes -v`
    - `PYTHONPATH=libs/common/src:apps/bot/src:services/orchestrator/src .venv/bin/python -m unittest tests.test_agent_state -v`
    - `PYTHONPATH=libs/common/src:apps/bot/src:services/orchestrator/src .venv/bin/python -m unittest tests.test_user_repository -v`
+   - `PYTHONPATH=libs/common/src:apps/bot/src:services/orchestrator/src .venv/bin/python -m unittest tests.test_sandbox_runner tests.test_sandbox_templates -v`
+   - `PYTHONPATH=libs/common/src:apps/bot/src:services/orchestrator/src .venv/bin/python -m unittest tests.test_offline_dataset -v`
 
 ## Definition of Done for Graph Node Work
 
 1. `run_full_graph_cycle(...)` completes without exceptions.
-2. Node outputs are written to expected state keys (`test_results`, `static_analysis`, `llm_review`, `score_breakdown`, `final_score`, `skill_profile`).
+2. Node outputs are written to expected state keys (`test_results`, `static_analysis`, `llm_review`, `observability_metrics`, `score_breakdown`, `final_score`, `skill_profile`, `branching`, `recommended_difficulty`).
 3. `llm_review` includes deterministic review fields (`summary`, `strengths`, `issues`, `improvement_suggestions`, `score_template`, `score`, `reviewer`) when `LLMReview` behavior is touched.
-4. `tests/test_graph_nodes.py` passes.
-5. Related contract tests (`tests/test_agent_state.py`, `tests/test_submission_validation.py`) pass when touched behavior affects them.
+4. `tests/test_graph_nodes.py` passes, including fallback and rate-limit scenarios when touched behavior affects them.
+5. Related contract tests (`tests/test_agent_state.py`, `tests/test_submission_validation.py`, `tests/test_user_repository.py`) pass when touched behavior affects them.
+6. If sandbox behavior is touched, `tests/test_sandbox_runner.py` and `tests/test_sandbox_templates.py` pass.
