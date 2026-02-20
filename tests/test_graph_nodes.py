@@ -9,6 +9,7 @@ from interview_orchestrator.sandbox_runner import SandboxExecutionResult
 from interview_orchestrator.state_steps import (
     BranchingPolicy,
     GeneratedTask,
+    InMemoryLLMRateLimiter,
     LangChainCloudLLMReviewer,
     ScoreAggregationWeights,
     branching_logic_node,
@@ -162,6 +163,30 @@ class StubLLMReviewer:
         }
 
 
+class CountingLLMReviewer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def review(self, state: AgentState) -> dict[str, object]:
+        _ = state
+        self.calls += 1
+        return {
+            "summary": "Counted review.",
+            "strengths": ["Baseline feedback."],
+            "issues": [],
+            "improvement_suggestions": ["Keep tests deterministic."],
+            "score_template": {
+                "correctness": 80.0,
+                "performance": 80.0,
+                "readability": 80.0,
+                "security": 80.0,
+                "final_score": 80.0,
+            },
+            "score": 80.0,
+            "reviewer": "counting-reviewer",
+        }
+
+
 class MalformedFallbackLLMReviewer:
     def review(self, state: AgentState) -> dict[str, object]:
         return {
@@ -301,6 +326,84 @@ class GraphNodesTests(unittest.TestCase):
         self.assertGreaterEqual(float(llm_score), 0.0)
         self.assertIsInstance(llm_review.get("score_template"), dict)
         self.assertIsInstance(llm_review.get("improvement_suggestions"), list)
+        self.assertIn("observability_metrics", updated_state)
+        observability_metrics_raw = updated_state.get("observability_metrics")
+        self.assertIsInstance(observability_metrics_raw, dict)
+        observability_metrics = cast(dict[str, object], observability_metrics_raw)
+        self.assertEqual(observability_metrics["fail_rate"], 0.0)
+        self.assertEqual(observability_metrics["cost_per_submission"], 0.0)
+
+    def test_llm_review_node_computes_metrics_from_tests_and_token_usage(self) -> None:
+        class TokenAwareReviewer:
+            def review(self, state: AgentState) -> dict[str, object]:
+                _ = state
+                return {
+                    "summary": "Cloud review with token usage.",
+                    "strengths": ["Passes core logic."],
+                    "issues": ["One edge case fails."],
+                    "improvement_suggestions": ["Cover additional edge cases."],
+                    "score_template": {
+                        "correctness": 75.0,
+                        "performance": 80.0,
+                        "readability": 78.0,
+                        "security": 90.0,
+                        "final_score": 79.9,
+                    },
+                    "score": 79.9,
+                    "reviewer": "token-aware",
+                    "token_usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 25,
+                        "total_tokens": 125,
+                    },
+                }
+
+        updated_state = llm_review_node(
+            state={
+                "user_id": "42",
+                "task_id": "task-metrics",
+                "language": "python",
+                "code": "print('ok')",
+                "execution_result": {
+                    "exit_code": 0,
+                    "stdout": "ok\n",
+                    "stderr": "",
+                    "timed_out": False,
+                },
+                "metrics": {
+                    "runtime_ms": 120,
+                    "memory_usage_kb": 1024,
+                    "exit_code": 0,
+                    "stdout": "ok\n",
+                    "stderr": "",
+                    "timed_out": False,
+                },
+                "test_results": {
+                    "total": 4,
+                    "passed": 3,
+                    "failed": 1,
+                    "first_failed_report": "Case #4 failed.",
+                    "case_results": [
+                        {"runtime_ms": 40},
+                        {"runtime_ms": 60},
+                        {"runtime_ms": 50},
+                        {"runtime_ms": 70},
+                    ],
+                },
+            },
+            llm_reviewer=TokenAwareReviewer(),
+        )
+
+        observability_metrics_raw = updated_state.get("observability_metrics")
+        self.assertIsInstance(observability_metrics_raw, dict)
+        observability_metrics = cast(dict[str, object], observability_metrics_raw)
+        self.assertEqual(observability_metrics["avg_runtime_ms"], 55.0)
+        self.assertEqual(observability_metrics["fail_rate"], 0.25)
+        cost_per_submission = observability_metrics.get("cost_per_submission")
+        self.assertIsInstance(cost_per_submission, (int, float))
+        if not isinstance(cost_per_submission, int | float):
+            self.fail("Expected numeric cost_per_submission.")
+        self.assertAlmostEqual(float(cost_per_submission), 0.000041, places=8)
 
     def test_langchain_cloud_llm_reviewer_retries_until_success(self) -> None:
         chain = FlakyStructuredReviewChain(
@@ -435,6 +538,63 @@ class GraphNodesTests(unittest.TestCase):
         self.assertEqual(llm_review["score"], 82.5)
         score_template = cast(dict[str, object], llm_review["score_template"])
         self.assertEqual(score_template["final_score"], 82.5)
+
+    def test_llm_review_node_blocks_second_call_when_rate_limit_is_exceeded(self) -> None:
+        reviewer = CountingLLMReviewer()
+        limiter = InMemoryLLMRateLimiter(max_calls=1, window_seconds=120)
+        state: AgentState = {
+            "user_id": "rate-limit-user",
+            "task_id": "task-rate-limit",
+            "language": "python",
+            "code": "print('ok')",
+        }
+
+        first_state = llm_review_node(
+            state=state,
+            llm_reviewer=reviewer,
+            llm_rate_limiter=limiter,
+        )
+        second_state = llm_review_node(
+            state=state,
+            llm_reviewer=reviewer,
+            llm_rate_limiter=limiter,
+        )
+
+        self.assertEqual(reviewer.calls, 1)
+        first_review = cast(dict[str, object], first_state["llm_review"])
+        second_review = cast(dict[str, object], second_state["llm_review"])
+        self.assertEqual(first_review["reviewer"], "counting-reviewer")
+        self.assertEqual(second_review["reviewer"], "heuristic_rate_limited")
+        issues = cast(list[str], second_review["issues"])
+        self.assertTrue(any("rate limit" in issue.lower() for issue in issues))
+        self.assertIn("observability_metrics", second_state)
+
+    def test_llm_review_node_rate_limit_is_tracked_per_user(self) -> None:
+        reviewer = CountingLLMReviewer()
+        limiter = InMemoryLLMRateLimiter(max_calls=1, window_seconds=120)
+
+        _ = llm_review_node(
+            state={
+                "user_id": "rate-user-a",
+                "task_id": "task-1",
+                "language": "python",
+                "code": "print('ok')",
+            },
+            llm_reviewer=reviewer,
+            llm_rate_limiter=limiter,
+        )
+        _ = llm_review_node(
+            state={
+                "user_id": "rate-user-b",
+                "task_id": "task-2",
+                "language": "python",
+                "code": "print('ok')",
+            },
+            llm_reviewer=reviewer,
+            llm_rate_limiter=limiter,
+        )
+
+        self.assertEqual(reviewer.calls, 2)
 
     def test_score_aggregation_node_writes_weighted_dimension_breakdown(self) -> None:
         state: AgentState = {
@@ -771,6 +931,7 @@ class GraphNodesTests(unittest.TestCase):
         self.assertIn("skill_profile", final_state)
         self.assertIn("branching", final_state)
         self.assertIn("recommended_difficulty", final_state)
+        self.assertIn("observability_metrics", final_state)
 
     def test_run_full_graph_cycle_emits_structured_submission_logs(self) -> None:
         with self.assertLogs("interview_orchestrator.pipeline", level="INFO") as captured:
@@ -792,7 +953,16 @@ class GraphNodesTests(unittest.TestCase):
         events = [str(payload.get("event")) for payload in payloads]
         self.assertIn("submission.pipeline.started", events)
         self.assertIn("submission.pipeline.completed", events)
+        self.assertIn("submission.metrics.computed", events)
         self.assertGreaterEqual(events.count("submission.pipeline.step_completed"), 8)
+        completed_payload = next(
+            payload
+            for payload in payloads
+            if payload.get("event") == "submission.pipeline.completed"
+        )
+        self.assertIn("avg_runtime_ms", completed_payload)
+        self.assertIn("fail_rate", completed_payload)
+        self.assertIn("cost_per_submission", completed_payload)
 
 
 if __name__ == "__main__":

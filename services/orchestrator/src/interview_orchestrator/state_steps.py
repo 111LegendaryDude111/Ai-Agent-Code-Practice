@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from threading import Lock
+from time import monotonic
 from typing import Any, Protocol, TypedDict, cast
 
 from interview_common import get_settings
@@ -110,7 +113,13 @@ _REVIEW_SCORE_WEIGHTS: dict[str, float] = {
     "security": _DEFAULT_SCORE_AGGREGATION_WEIGHTS.security_weight,
 }
 _COMPLEXITY_MISTAKE_THRESHOLD = 8.0
+_SANDBOX_COST_PER_MS_USD = 0.0000002
+_LLM_PROMPT_TOKEN_COST_USD = 0.00000015
+_LLM_COMPLETION_TOKEN_COST_USD = 0.0000006
 _PIPELINE_LOGGER = logging.getLogger("interview_orchestrator.pipeline")
+_DEFAULT_LLM_RATE_LIMITER: InMemoryLLMRateLimiter | None = None
+_DEFAULT_LLM_RATE_LIMITER_CONFIG: tuple[int, int] | None = None
+_DEFAULT_LLM_RATE_LIMITER_LOCK = Lock()
 
 
 class TaskGenerationExecutor(Protocol):
@@ -126,6 +135,10 @@ class LLMReviewExecutor(Protocol):
     def review(self, state: AgentState) -> dict[str, object]: ...
 
 
+class LLMRateLimiter(Protocol):
+    def check(self, *, user_id: str) -> tuple[bool, int]: ...
+
+
 class StructuredReviewChain(Protocol):
     def invoke(self, input: dict[str, object]) -> object: ...
 
@@ -139,6 +152,48 @@ class ProfileUpdateExecutor(Protocol):
         final_score: float,
         current_profile: Mapping[str, object] | None = None,
     ) -> dict[str, object]: ...
+
+
+class InMemoryLLMRateLimiter:
+    def __init__(
+        self,
+        *,
+        max_calls: int,
+        window_seconds: int,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._max_calls = max(1, max_calls)
+        self._window_seconds = max(1, window_seconds)
+        self._clock = clock or monotonic
+        self._events_by_user: dict[str, deque[float]] = {}
+        self._lock = Lock()
+
+    def check(self, *, user_id: str) -> tuple[bool, int]:
+        normalized_user_id = user_id.strip()
+        if normalized_user_id == "":
+            return True, 0
+
+        now = self._clock()
+        window_start = now - float(self._window_seconds)
+
+        with self._lock:
+            events = self._events_by_user.get(normalized_user_id)
+            if events is None:
+                events = deque()
+                self._events_by_user[normalized_user_id] = events
+
+            while len(events) > 0 and events[0] <= window_start:
+                events.popleft()
+
+            if len(events) >= self._max_calls:
+                retry_after = max(
+                    1,
+                    int(round(float(self._window_seconds) - (now - events[0]))),
+                )
+                return False, retry_after
+
+            events.append(now)
+            return True, 0
 
 
 class _PromptModelStructuredReviewChain:
@@ -366,13 +421,16 @@ class LangChainCloudLLMReviewer:
                     attempt=attempt,
                     token_usage=token_usage,
                 )
-                return _normalize_llm_review_payload(
+                normalized_review = _normalize_llm_review_payload(
                     raw_review,
                     default_reviewer="langchain-cloud",
                     default_score=default_score,
                     default_score_template=score_template,
                     default_improvement_suggestions=default_improvement_suggestions,
                 )
+                if token_usage is not None:
+                    normalized_review["token_usage"] = token_usage
+                return normalized_review
             except Exception as error:  # noqa: BLE001 - reviewer should degrade gracefully
                 last_error = error
                 _log_pipeline_event(
@@ -588,6 +646,7 @@ def static_analysis_node(
 def llm_review_node(
     state: AgentState,
     llm_reviewer: LLMReviewExecutor | None = None,
+    llm_rate_limiter: LLMRateLimiter | None = None,
 ) -> AgentState:
     validated_state = validate_agent_state(state)
     _log_pipeline_event(
@@ -595,14 +654,56 @@ def llm_review_node(
         event="submission.llm_review.started",
         state=validated_state,
     )
+    limiter = llm_rate_limiter or _get_default_llm_rate_limiter()
+    is_allowed, retry_after_seconds = limiter.check(user_id=validated_state["user_id"])
+    if not is_allowed:
+        review = _build_rate_limited_review_payload(
+            state=validated_state,
+            retry_after_seconds=retry_after_seconds,
+        )
+        observability_metrics = _compute_observability_metrics(
+            state=validated_state,
+            llm_token_usage=None,
+        )
+        rate_limited_state: dict[str, object] = dict(validated_state)
+        rate_limited_state["llm_review"] = review
+        rate_limited_state["observability_metrics"] = observability_metrics
+        _log_pipeline_event(
+            logging.WARNING,
+            event="submission.llm_review.rate_limited",
+            state=rate_limited_state,
+            retry_after_seconds=retry_after_seconds,
+        )
+        _log_pipeline_event(
+            logging.INFO,
+            event="submission.metrics.computed",
+            state=rate_limited_state,
+            avg_runtime_ms=observability_metrics["avg_runtime_ms"],
+            fail_rate=observability_metrics["fail_rate"],
+            cost_per_submission=observability_metrics["cost_per_submission"],
+        )
+        _log_pipeline_event(
+            logging.INFO,
+            event="submission.llm_review.completed",
+            state=rate_limited_state,
+            reviewer=review.get("reviewer"),
+            score=review.get("score"),
+            cost_per_submission=observability_metrics["cost_per_submission"],
+        )
+        return validate_agent_state(rate_limited_state)
+
     reviewer = llm_reviewer or _build_default_llm_reviewer()
     raw_review = reviewer.review(validated_state)
     if not isinstance(raw_review, dict):
         raise ValueError("llm_reviewer must return a dictionary payload.")
 
+    token_usage = _normalize_token_usage(raw_review.get("token_usage"))
+    normalized_payload = dict(raw_review)
+    normalized_payload.pop("token_usage", None)
+
     score_template = _build_review_score_template(validated_state)
     review = _normalize_llm_review_payload(
-        raw_review,
+        normalized_payload,
         default_reviewer="llm_reviewer",
         default_score=score_template["final_score"],
         default_score_template=score_template,
@@ -611,14 +712,28 @@ def llm_review_node(
             max_suggestions=3,
         ),
     )
+    observability_metrics = _compute_observability_metrics(
+        state=validated_state,
+        llm_token_usage=token_usage,
+    )
     updated_state: dict[str, object] = dict(validated_state)
     updated_state["llm_review"] = review
+    updated_state["observability_metrics"] = observability_metrics
+    _log_pipeline_event(
+        logging.INFO,
+        event="submission.metrics.computed",
+        state=updated_state,
+        avg_runtime_ms=observability_metrics["avg_runtime_ms"],
+        fail_rate=observability_metrics["fail_rate"],
+        cost_per_submission=observability_metrics["cost_per_submission"],
+    )
     _log_pipeline_event(
         logging.INFO,
         event="submission.llm_review.completed",
         state=updated_state,
         reviewer=review.get("reviewer"),
         score=review.get("score"),
+        cost_per_submission=observability_metrics["cost_per_submission"],
     )
     return validate_agent_state(updated_state)
 
@@ -1053,6 +1168,7 @@ def run_full_graph_cycle(
     test_runner: TestStepRunner | None = None,
     static_analyzer: StaticAnalysisExecutor | None = None,
     llm_reviewer: LLMReviewExecutor | None = None,
+    llm_rate_limiter: LLMRateLimiter | None = None,
     profile_updater: ProfileUpdateExecutor | None = None,
     weights: ScoreAggregationWeights | None = None,
     branching_policy: BranchingPolicy | None = None,
@@ -1112,6 +1228,7 @@ def run_full_graph_cycle(
         current_state = llm_review_node(
             state=current_state,
             llm_reviewer=llm_reviewer,
+            llm_rate_limiter=llm_rate_limiter,
         )
         _log_pipeline_event(
             logging.INFO,
@@ -1156,6 +1273,18 @@ def run_full_graph_cycle(
             final_score=current_state.get("final_score"),
             recommended_difficulty=current_state.get("recommended_difficulty"),
             next_node=cast(dict[str, object], current_state.get("branching", {})).get("next_node"),
+            avg_runtime_ms=cast(
+                dict[str, object],
+                current_state.get("observability_metrics", {}),
+            ).get("avg_runtime_ms"),
+            fail_rate=cast(
+                dict[str, object],
+                current_state.get("observability_metrics", {}),
+            ).get("fail_rate"),
+            cost_per_submission=cast(
+                dict[str, object],
+                current_state.get("observability_metrics", {}),
+            ).get("cost_per_submission"),
         )
         return validate_agent_state(current_state)
     except Exception as error:
@@ -1210,6 +1339,58 @@ def _build_default_llm_reviewer() -> LLMReviewExecutor:
         api_key=settings.llm_api_key,
         fallback_reviewer=HeuristicLLMReviewer(),
     )
+
+
+def _get_default_llm_rate_limiter() -> InMemoryLLMRateLimiter:
+    settings = get_settings()
+    limiter_config = (
+        max(1, settings.llm_rate_limit_count),
+        max(1, settings.llm_rate_limit_window_seconds),
+    )
+
+    global _DEFAULT_LLM_RATE_LIMITER
+    global _DEFAULT_LLM_RATE_LIMITER_CONFIG
+
+    with _DEFAULT_LLM_RATE_LIMITER_LOCK:
+        if _DEFAULT_LLM_RATE_LIMITER is None or _DEFAULT_LLM_RATE_LIMITER_CONFIG != limiter_config:
+            _DEFAULT_LLM_RATE_LIMITER = InMemoryLLMRateLimiter(
+                max_calls=limiter_config[0],
+                window_seconds=limiter_config[1],
+            )
+            _DEFAULT_LLM_RATE_LIMITER_CONFIG = limiter_config
+
+        return _DEFAULT_LLM_RATE_LIMITER
+
+
+def _build_rate_limited_review_payload(
+    state: AgentState,
+    *,
+    retry_after_seconds: int,
+) -> dict[str, object]:
+    score_template = _build_review_score_template(state)
+    review = _normalize_llm_review_payload(
+        HeuristicLLMReviewer().review(state),
+        default_reviewer="heuristic",
+        default_score=score_template["final_score"],
+        default_score_template=score_template,
+        default_improvement_suggestions=_build_improvement_suggestions(
+            state=state,
+            max_suggestions=3,
+        ),
+    )
+    issues = _normalize_non_empty_string_list(
+        review.get("issues"),
+        fallback=["No critical issues detected."],
+    )
+    rate_limit_message = (
+        "Cloud LLM review skipped due to rate limit. "
+        f"Retry in {max(1, retry_after_seconds)} seconds."
+    )
+    if rate_limit_message not in issues:
+        issues.append(rate_limit_message)
+    review["issues"] = issues
+    review["reviewer"] = "heuristic_rate_limited"
+    return review
 
 
 def _log_pipeline_event(
@@ -1382,6 +1563,68 @@ def _coerce_non_negative_int(value: object) -> int | None:
             return int(value)
         return None
     return None
+
+
+def _compute_observability_metrics(
+    state: AgentState,
+    llm_token_usage: dict[str, int] | None,
+) -> dict[str, float]:
+    avg_runtime_ms = _compute_average_runtime_ms(state)
+    fail_rate = _compute_submission_fail_rate(state)
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    if llm_token_usage is not None:
+        prompt_tokens = llm_token_usage.get("prompt_tokens", 0)
+        completion_tokens = llm_token_usage.get("completion_tokens", 0)
+
+    runtime_cost = avg_runtime_ms * _SANDBOX_COST_PER_MS_USD
+    llm_cost = (prompt_tokens * _LLM_PROMPT_TOKEN_COST_USD) + (
+        completion_tokens * _LLM_COMPLETION_TOKEN_COST_USD
+    )
+    total_cost = max(0.0, runtime_cost + llm_cost)
+    return {
+        "avg_runtime_ms": round(avg_runtime_ms, 2),
+        "fail_rate": round(fail_rate, 4),
+        "cost_per_submission": round(total_cost, 8),
+    }
+
+
+def _compute_average_runtime_ms(state: AgentState) -> float:
+    test_results = state.get("test_results")
+    if isinstance(test_results, dict):
+        case_results = test_results.get("case_results")
+        if isinstance(case_results, list):
+            runtimes: list[int] = []
+            for case_result in case_results:
+                if not isinstance(case_result, dict):
+                    continue
+                runtime_ms = _coerce_non_negative_int(case_result.get("runtime_ms"))
+                if runtime_ms is not None:
+                    runtimes.append(runtime_ms)
+            if len(runtimes) > 0:
+                return float(sum(runtimes) / len(runtimes))
+
+    metrics = state.get("metrics")
+    if not isinstance(metrics, dict):
+        return 0.0
+
+    runtime_ms = _coerce_non_negative_int(metrics.get("runtime_ms"))
+    if runtime_ms is None:
+        return 0.0
+    return float(runtime_ms)
+
+
+def _compute_submission_fail_rate(state: AgentState) -> float:
+    test_results = state.get("test_results")
+    if isinstance(test_results, dict):
+        total = _coerce_non_negative_int(test_results.get("total"))
+        failed = _coerce_non_negative_int(test_results.get("failed"))
+        if total is not None and failed is not None and total > 0:
+            normalized_failed = min(total, failed)
+            return float(normalized_failed / total)
+
+    return 1.0 if _has_submission_failure(state) else 0.0
 
 
 def _normalize_llm_review_payload(

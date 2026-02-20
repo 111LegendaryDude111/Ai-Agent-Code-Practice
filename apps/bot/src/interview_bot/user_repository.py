@@ -567,10 +567,24 @@ FROM submissions
 WHERE id = ?;
 """
 
+SELECT_RECENT_SUBMISSIONS_COUNT_SQLITE_SQL = """
+SELECT COUNT(*)
+FROM submissions
+WHERE telegram_id = ?
+  AND created_at >= datetime('now', ?);
+"""
+
 SELECT_SUBMISSION_EXISTS_POSTGRES_SQL = """
 SELECT id
 FROM submissions
 WHERE id = %s;
+"""
+
+SELECT_RECENT_SUBMISSIONS_COUNT_POSTGRES_SQL = """
+SELECT COUNT(*)
+FROM submissions
+WHERE telegram_id = %s
+  AND created_at >= (NOW() - (%s * INTERVAL '1 second'));
 """
 
 CREATE_USERS_CREATED_AT_INDEX_POSTGRES_SQL = """
@@ -669,6 +683,12 @@ class UserRepository(Protocol):
         code: str,
         task_id: int | None = None,
     ) -> int | None: ...
+
+    async def count_recent_submissions(
+        self,
+        telegram_id: int,
+        window_seconds: int,
+    ) -> int: ...
 
     async def save_submission_metrics(
         self,
@@ -770,6 +790,17 @@ class SQLiteUserRepository:
             telegram_id,
             code,
             task_id,
+        )
+
+    async def count_recent_submissions(
+        self,
+        telegram_id: int,
+        window_seconds: int,
+    ) -> int:
+        return await asyncio.to_thread(
+            self._count_recent_submissions_sync,
+            telegram_id,
+            window_seconds,
         )
 
     async def save_submission_metrics(
@@ -1017,6 +1048,20 @@ class SQLiteUserRepository:
         if cursor.lastrowid is None:
             return None
         return int(cursor.lastrowid)
+
+    def _count_recent_submissions_sync(self, telegram_id: int, window_seconds: int) -> int:
+        normalized_window_seconds = max(1, window_seconds)
+        interval_modifier = f"-{normalized_window_seconds} seconds"
+
+        with closing(sqlite3.connect(self._database_path)) as connection:
+            row = connection.execute(
+                SELECT_RECENT_SUBMISSIONS_COUNT_SQLITE_SQL,
+                (telegram_id, interval_modifier),
+            ).fetchone()
+
+        if row is None:
+            return 0
+        return _coerce_int(row[0], "submissions.recent_count")
 
     def _save_submission_metrics_sync(
         self,
@@ -1324,6 +1369,20 @@ class PostgresUserRepository:
         if row is None:
             return None
         return _coerce_int(row[0], "submission.id")
+
+    async def count_recent_submissions(
+        self,
+        telegram_id: int,
+        window_seconds: int,
+    ) -> int:
+        normalized_window_seconds = max(1, window_seconds)
+        row = await self._fetch_one(
+            SELECT_RECENT_SUBMISSIONS_COUNT_POSTGRES_SQL,
+            (telegram_id, normalized_window_seconds),
+        )
+        if row is None:
+            return 0
+        return _coerce_int(row[0], "submissions.recent_count")
 
     async def save_submission_metrics(
         self,

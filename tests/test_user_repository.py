@@ -146,6 +146,66 @@ class SQLiteUserRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row[2], "python")
         self.assertEqual(row[3], "print('saved')")
 
+    async def test_count_recent_submissions_uses_time_window_and_user_scope(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            database_path = Path(tmp_dir) / "bot.db"
+            repository = SQLiteUserRepository(str(database_path))
+
+            await repository.ensure_schema()
+            await repository.register_user(telegram_id=111)
+            await repository.set_preferred_language(
+                telegram_id=111,
+                preferred_language="python",
+            )
+            await repository.register_user(telegram_id=222)
+            await repository.set_preferred_language(
+                telegram_id=222,
+                preferred_language="python",
+            )
+
+            await repository.save_submission(telegram_id=111, code="print('first')")
+            await repository.save_submission(telegram_id=111, code="print('second')")
+            await repository.save_submission(telegram_id=222, code="print('third')")
+
+            with closing(sqlite3.connect(database_path)) as connection:
+                oldest_user_submission = connection.execute(
+                    """
+                    SELECT id
+                    FROM submissions
+                    WHERE telegram_id = ?
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """,
+                    (111,),
+                ).fetchone()
+                if oldest_user_submission is not None:
+                    connection.execute(
+                        """
+                        UPDATE submissions
+                        SET created_at = datetime('now', '-2 hours')
+                        WHERE id = ?
+                        """,
+                        (oldest_user_submission[0],),
+                    )
+                connection.commit()
+
+            user_recent = await repository.count_recent_submissions(
+                telegram_id=111,
+                window_seconds=60,
+            )
+            other_user_recent = await repository.count_recent_submissions(
+                telegram_id=222,
+                window_seconds=60,
+            )
+            unknown_user_recent = await repository.count_recent_submissions(
+                telegram_id=999,
+                window_seconds=60,
+            )
+
+        self.assertEqual(user_recent, 1)
+        self.assertEqual(other_user_recent, 1)
+        self.assertEqual(unknown_user_recent, 0)
+
     async def test_save_submission_metrics_persists_runtime_memory_and_streams(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             database_path = Path(tmp_dir) / "bot.db"

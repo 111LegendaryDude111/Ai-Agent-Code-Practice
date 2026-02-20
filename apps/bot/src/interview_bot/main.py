@@ -69,6 +69,12 @@ def _build_dispatcher(user_repository: UserRepository) -> Any:
     _, Dispatcher, Router, CommandStart, F, _, _ = _import_aiogram()
 
     router = Router()
+    settings = get_settings()
+    submission_rate_limit_count = max(1, settings.submission_rate_limit_count)
+    submission_rate_limit_window_seconds = max(
+        1,
+        settings.submission_rate_limit_window_seconds,
+    )
 
     @router.message(CommandStart())
     async def start_handler(message: Any) -> None:
@@ -150,6 +156,18 @@ def _build_dispatcher(user_repository: UserRepository) -> Any:
 
             if submission_text is None:
                 await message.answer("Не удалось обработать сообщение.")
+                return
+
+            recent_submissions = await user_repository.count_recent_submissions(
+                from_user.id,
+                submission_rate_limit_window_seconds,
+            )
+            if recent_submissions >= submission_rate_limit_count:
+                await message.answer(
+                    "Слишком много отправок за короткий интервал. "
+                    f"Лимит: {submission_rate_limit_count} за "
+                    f"{submission_rate_limit_window_seconds} сек."
+                )
                 return
 
             is_saved = await user_repository.save_submission(from_user.id, submission_text)

@@ -29,6 +29,19 @@ def _read_env(name: str, default: str | None = None) -> str | None:
     return value
 
 
+def _read_env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw_value = _read_env(name)
+    if raw_value is None:
+        return max(minimum, default)
+
+    try:
+        parsed_value = int(raw_value)
+    except ValueError:
+        return max(minimum, default)
+
+    return max(minimum, parsed_value)
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str
@@ -36,6 +49,10 @@ class Settings:
     database_url: str
     bot_token: str | None
     llm_api_key: str | None
+    submission_rate_limit_count: int
+    submission_rate_limit_window_seconds: int
+    llm_rate_limit_count: int
+    llm_rate_limit_window_seconds: int
 
 
 @lru_cache(maxsize=1)
@@ -51,4 +68,24 @@ def get_settings() -> Settings:
         or "postgresql+psycopg://postgres:postgres@localhost:5432/interview_assistant",
         bot_token=_read_env("BOT_TOKEN"),
         llm_api_key=_read_env("LLM_API_KEY"),
+        submission_rate_limit_count=_read_env_int(
+            "SUBMISSION_RATE_LIMIT_COUNT",
+            default=15,
+            minimum=1,
+        ),
+        submission_rate_limit_window_seconds=_read_env_int(
+            "SUBMISSION_RATE_LIMIT_WINDOW_SECONDS",
+            default=60,
+            minimum=1,
+        ),
+        llm_rate_limit_count=_read_env_int(
+            "LLM_RATE_LIMIT_COUNT",
+            default=20,
+            minimum=1,
+        ),
+        llm_rate_limit_window_seconds=_read_env_int(
+            "LLM_RATE_LIMIT_WINDOW_SECONDS",
+            default=60,
+            minimum=1,
+        ),
     )

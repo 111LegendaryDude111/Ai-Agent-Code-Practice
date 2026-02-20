@@ -53,7 +53,13 @@ class BootstrapTests(unittest.TestCase):
             tmp_path = Path(tmp_dir)
             env_file = tmp_path / ".env"
             env_file.write_text(
-                "APP_ENV=qa\nLOG_LEVEL=WARNING\nBOT_TOKEN=secret-token\n",
+                "APP_ENV=qa\n"
+                "LOG_LEVEL=WARNING\n"
+                "BOT_TOKEN=secret-token\n"
+                "SUBMISSION_RATE_LIMIT_COUNT=7\n"
+                "SUBMISSION_RATE_LIMIT_WINDOW_SECONDS=45\n"
+                "LLM_RATE_LIMIT_COUNT=4\n"
+                "LLM_RATE_LIMIT_WINDOW_SECONDS=90\n",
                 encoding="utf-8",
             )
 
@@ -68,6 +74,10 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(settings.app_env, "qa")
         self.assertEqual(settings.log_level, "WARNING")
         self.assertEqual(settings.bot_token, "secret-token")
+        self.assertEqual(settings.submission_rate_limit_count, 7)
+        self.assertEqual(settings.submission_rate_limit_window_seconds, 45)
+        self.assertEqual(settings.llm_rate_limit_count, 4)
+        self.assertEqual(settings.llm_rate_limit_window_seconds, 90)
 
 
 if __name__ == "__main__":

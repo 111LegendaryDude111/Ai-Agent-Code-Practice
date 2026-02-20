@@ -36,7 +36,7 @@ Monorepo foundation for the project described in `PDR.md`.
 
 ### Common (`libs/common/src/interview_common`)
 
-- `settings.py` - загрузка `.env` и `Settings` (`APP_ENV`, `LOG_LEVEL`, `DATABASE_URL`, `BOT_TOKEN`, `LLM_API_KEY`).
+- `settings.py` - загрузка `.env` и `Settings` (`APP_ENV`, `LOG_LEVEL`, `DATABASE_URL`, `BOT_TOKEN`, `LLM_API_KEY`, rate-limit параметры).
 
 ### Sandbox templates (`sandbox`)
 
@@ -63,6 +63,10 @@ cp .env.example .env
 ```env
 DATABASE_URL=sqlite:///tmp/bot.db
 BOT_TOKEN=<your_telegram_bot_token>
+SUBMISSION_RATE_LIMIT_COUNT=15
+SUBMISSION_RATE_LIMIT_WINDOW_SECONDS=60
+LLM_RATE_LIMIT_COUNT=20
+LLM_RATE_LIMIT_WINDOW_SECONDS=60
 ```
 
 ### 3. Проверка проекта
