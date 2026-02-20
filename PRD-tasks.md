@@ -1,12 +1,14 @@
-Отлично. Ниже — **PDR Tasks Breakdown** в production-ориентированном формате: эпики → задачи → критерии готовности (DoD). Это можно напрямую переносить в Jira / Linear / GitHub Projects.
+# PDR Tasks Breakdown
 
 ---
-
-# 📄 PDR Tasks
-
 ## Project: Agentic Interview Coding Assistant
 
 ---
+
+## Status Snapshot (2026-02-20)
+
+- EPIC 14.1 (rate limiting): implemented in bot repository layer + orchestrator limiter abstraction.
+- EPIC 15.1 (error handling): implemented and covered by unit tests.
 
 # EPIC 1 — Project Foundation
 
@@ -414,6 +416,10 @@
 
 ## 15.1 Error Handling
 
+**Status:**
+
+- Done
+
 **Tasks:**
 
 - Graceful fallback on LLM failure
@@ -422,3 +428,9 @@
 **DoD:**
 
 - Система не падает при частичных ошибках
+
+**Acceptance evidence:**
+
+- `tests.test_graph_nodes.GraphNodesTests.test_llm_review_node_falls_back_when_reviewer_raises`
+- `tests.test_graph_nodes.GraphNodesTests.test_run_full_graph_cycle_recovers_from_partial_failures`
+- `tests.test_sandbox_runner.DockerSandboxRunnerTests.test_execute_recovers_when_command_building_crashes`

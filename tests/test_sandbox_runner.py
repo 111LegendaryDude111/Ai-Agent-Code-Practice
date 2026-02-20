@@ -183,6 +183,36 @@ class DockerSandboxRunnerTests(unittest.TestCase):
         self.assertTrue(has_missing_docker_type)
 
     @patch("interview_orchestrator.sandbox_runner.subprocess.run")
+    def test_execute_recovers_when_command_building_crashes(
+        self,
+        subprocess_run_mock: Mock,
+    ) -> None:
+        subprocess_run_mock.return_value = subprocess.CompletedProcess(
+            args=["docker", "rm", "-f", "container"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        runner = DockerSandboxRunner(seccomp_profile_path="/tmp/does-not-exist-seccomp.json")
+
+        with self.assertLogs("interview_orchestrator.sandbox", level="ERROR") as captured:
+            result = runner.execute(
+                language="python",
+                source_code="print('ok')",
+                limits=SandboxLimits(timeout_seconds=1.0),
+            )
+
+        self.assertIsNone(result.exit_code)
+        self.assertIn("Sandbox runner crashed", result.stderr)
+        self.assertEqual(subprocess_run_mock.call_count, 1)
+        cleanup_command = subprocess_run_mock.call_args_list[0].args[0]
+        self.assertEqual(cleanup_command[0:3], ["docker", "rm", "-f"])
+        self.assertEqual(cleanup_command[3], result.container_name)
+        captured_text = "\n".join(captured.output)
+        self.assertIn('"event": "sandbox.execution.crashed"', captured_text)
+        self.assertIn('"crash_type": "ValueError"', captured_text)
+
+    @patch("interview_orchestrator.sandbox_runner.subprocess.run")
     def test_execute_uses_single_read_only_mount_from_tempdir(
         self,
         subprocess_run_mock: Mock,

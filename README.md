@@ -15,8 +15,8 @@ Monorepo foundation for the project described in `PDR.md`.
 1. Пользователь отправляет код в Telegram.
 2. Bot сохраняет submission в БД.
 3. Orchestrator прогоняет graph steps:
-   `GenerateTask -> ExecuteSandbox -> RunTests -> StaticAnalysis -> LLMReview -> ScoreAggregation -> UpdateProfile`.
-4. Результаты (метрики, статанализ, score) сохраняются и используются для профиля пользователя.
+   `GenerateTask -> ExecuteSandbox -> RunTests -> StaticAnalysis -> LLMReview -> ScoreAggregation -> UpdateProfile -> BranchingLogic`.
+4. Результаты (метрики, статанализ, review, score, branching) сохраняются и используются для профиля пользователя.
 
 ## Краткое описание модулей
 
@@ -41,6 +41,17 @@ Monorepo foundation for the project described in `PDR.md`.
 ### Sandbox templates (`sandbox`)
 
 - `sandbox/python`, `sandbox/go`, `sandbox/java`, `sandbox/cpp` - Dockerfile + `run.sh` для изолированного выполнения по языкам.
+- `sandbox/seccomp/sandbox-seccomp.json` - seccomp-профиль для запуска контейнеров.
+
+## Reliability (EPIC 14/15)
+
+- LLM review деградирует детерминированно:
+  - cloud/reviewer failure -> `reviewer = "heuristic_fallback"`
+  - rate limit -> `reviewer = "heuristic_rate_limited"`
+- При recoverable ошибках sandbox/state-step пайплайн не падает:
+  - `DockerSandboxRunner.execute(...)` возвращает структурированный `SandboxExecutionResult`
+  - `execute_sandbox_step(...)` пишет `execution_result`/`metrics` даже при падении executor
+- `observability_metrics` считаются в `llm_review_node` и в fallback/rate-limited сценариях.
 
 ## Краткий гайд запуска
 
@@ -79,6 +90,13 @@ make test
 
 ```bash
 make ci
+```
+
+Точечные проверки reliability/scenario-кейсов:
+
+```bash
+PYTHONPATH=libs/common/src:apps/bot/src:services/orchestrator/src \
+.venv/bin/python -m unittest tests.test_graph_nodes tests.test_sandbox_runner tests.test_agent_state -v
 ```
 
 ### 4. Запуск сервисов

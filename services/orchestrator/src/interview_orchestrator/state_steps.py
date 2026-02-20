@@ -692,26 +692,45 @@ def llm_review_node(
         )
         return validate_agent_state(rate_limited_state)
 
-    reviewer = llm_reviewer or _build_default_llm_reviewer()
-    raw_review = reviewer.review(validated_state)
-    if not isinstance(raw_review, dict):
-        raise ValueError("llm_reviewer must return a dictionary payload.")
-
-    token_usage = _normalize_token_usage(raw_review.get("token_usage"))
-    normalized_payload = dict(raw_review)
-    normalized_payload.pop("token_usage", None)
-
     score_template = _build_review_score_template(validated_state)
-    review = _normalize_llm_review_payload(
-        normalized_payload,
-        default_reviewer="llm_reviewer",
-        default_score=score_template["final_score"],
-        default_score_template=score_template,
-        default_improvement_suggestions=_build_improvement_suggestions(
-            state=validated_state,
-            max_suggestions=3,
-        ),
+    default_improvement_suggestions = _build_improvement_suggestions(
+        state=validated_state,
+        max_suggestions=3,
     )
+    reviewer = llm_reviewer or _build_default_llm_reviewer()
+    token_usage: dict[str, int] | None = None
+    try:
+        raw_review = reviewer.review(validated_state)
+        if not isinstance(raw_review, dict):
+            raise ValueError("llm_reviewer must return a dictionary payload.")
+
+        token_usage = _normalize_token_usage(raw_review.get("token_usage"))
+        normalized_payload = dict(raw_review)
+        normalized_payload.pop("token_usage", None)
+        review = _normalize_llm_review_payload(
+            normalized_payload,
+            default_reviewer="llm_reviewer",
+            default_score=score_template["final_score"],
+            default_score_template=score_template,
+            default_improvement_suggestions=default_improvement_suggestions,
+        )
+    except Exception as error:  # noqa: BLE001 - review failures must degrade gracefully
+        review = _build_failed_llm_review_payload(
+            state=validated_state,
+            score_template=score_template,
+            default_improvement_suggestions=default_improvement_suggestions,
+            error=error,
+        )
+        _log_pipeline_event(
+            logging.WARNING,
+            event="submission.llm_review.fallback",
+            state=validated_state,
+            reviewer="heuristic_fallback",
+            reason="reviewer_exception",
+            error_type=type(error).__name__,
+            error=str(error),
+        )
+
     observability_metrics = _compute_observability_metrics(
         state=validated_state,
         llm_token_usage=token_usage,
@@ -965,13 +984,53 @@ def execute_sandbox_step(
         state=validated_state,
         main_class_name=main_class_name,
     )
-    execution = executor.execute(
-        language=validated_state["language"],
-        source_code=validated_state["code"],
-        limits=limits,
-        main_class_name=main_class_name,
-        stdin_data=stdin_data,
-    )
+    started_at = monotonic()
+    try:
+        execution = executor.execute(
+            language=validated_state["language"],
+            source_code=validated_state["code"],
+            limits=limits,
+            main_class_name=main_class_name,
+            stdin_data=stdin_data,
+        )
+    except Exception as error:  # noqa: BLE001 - sandbox failures should not break the graph
+        runtime_ms = max(0, int(round((monotonic() - started_at) * 1000)))
+        error_message = f"Sandbox execution failed: {type(error).__name__}: {error}"
+        recovered_state: dict[str, object] = dict(validated_state)
+        recovered_state["execution_result"] = {
+            "exit_code": None,
+            "stdout": "",
+            "stderr": error_message,
+            "timed_out": False,
+        }
+        recovered_state["metrics"] = {
+            "runtime_ms": runtime_ms,
+            "memory_usage_kb": None,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": error_message,
+            "timed_out": False,
+        }
+        _log_pipeline_event(
+            logging.WARNING,
+            event="submission.sandbox.recovered",
+            state=recovered_state,
+            error_type=type(error).__name__,
+            error=str(error),
+            runtime_ms=runtime_ms,
+            exc_info=True,
+        )
+        _log_pipeline_event(
+            logging.INFO,
+            event="submission.sandbox.completed",
+            state=recovered_state,
+            exit_code=None,
+            timed_out=False,
+            runtime_ms=runtime_ms,
+            memory_usage_kb=None,
+            stderr_excerpt=_truncate_for_log(error_message, max_length=200),
+        )
+        return validate_agent_state(recovered_state)
 
     runtime_ms = max(0, int(round(execution.duration_seconds * 1000)))
     updated_state: dict[str, object] = dict(validated_state)
@@ -1390,6 +1449,33 @@ def _build_rate_limited_review_payload(
         issues.append(rate_limit_message)
     review["issues"] = issues
     review["reviewer"] = "heuristic_rate_limited"
+    return review
+
+
+def _build_failed_llm_review_payload(
+    state: AgentState,
+    *,
+    score_template: Mapping[str, float],
+    default_improvement_suggestions: list[str],
+    error: Exception,
+) -> dict[str, object]:
+    review = _normalize_llm_review_payload(
+        HeuristicLLMReviewer().review(state),
+        default_reviewer="heuristic",
+        default_score=score_template["final_score"],
+        default_score_template=score_template,
+        default_improvement_suggestions=default_improvement_suggestions,
+    )
+    issues = _normalize_non_empty_string_list(
+        review.get("issues"),
+        fallback=["No critical issues detected."],
+    )
+    fallback_issue = "LLM review failed. Used heuristic fallback."
+    if fallback_issue not in issues:
+        issues.append(fallback_issue)
+    review["issues"] = issues
+    review["reviewer"] = "heuristic_fallback"
+    review["llm_error"] = f"{type(error).__name__}: {error}"
     return review
 
 

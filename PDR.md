@@ -1,208 +1,111 @@
-Project: Agentic Interview Coding Assistant
+# PDR - Agentic Interview Coding Assistant (Current State)
 
+## 1. Scope
 
-1. Updated Tech Stack
+Проект реализован как monorepo с Telegram bot, orchestrator pipeline и sandbox execution для задач по программированию.
+Цель: детерминированно оценивать submissions и адаптировать сложность задач без падения всего пайплайна при частичных ошибках.
 
-Core Stack
-Backend: Python 3.11+
-Agent Framework: LangGraph
-LLM Abstraction: LangChain
-LLM Provider: Cloud LLM via API
-Bot Interface: aiogram (Telegram)
-Execution Isolation: Docker
-Database: Postgres (JSONB usage)
-Queue (optional Phase 2): Redis / Celery
-Observability: Logging + Prometheus (optional)
+## 2. Stack
 
-2. Updated System Architecture
-Telegram User
-     ↓
-aiogram Bot Layer
-     ↓
-API / Service Layer
-     ↓
-LangGraph Orchestrator
-     ↓
- ├── Task Generator Agent (LLM)
- ├── Execution Agent (Sandbox Tool)
- ├── Test Runner Tool
- ├── Static Analyzer Tool
- ├── Performance Profiler Tool
- ├── Reviewer Agent (LLM)
- └── Progress Analyzer Agent (LLM)
-     ↓
-Postgres
+- Backend: Python 3.11+
+- Bot: `aiogram`
+- Orchestration: state-graph workflow (`state_steps.py`)
+- LLM integration: LangChain + cloud LLM API + deterministic normalization
+- Execution isolation: Docker (per-language templates)
+- Storage: SQLite/Postgres via repository layer
+- Static analysis: `pylint`, `radon`, `bandit`
 
-3. Telegram Flow (aiogram Layer)
-3.1 On Bot Start
+## 3. Runtime Architecture
 
-При первом запуске:
+- `apps/bot/src/interview_bot`
+  - регистрация пользователей
+  - выбор языка
+  - прием и валидация submission
+  - submission rate limit
+- `services/orchestrator/src/interview_orchestrator`
+  - graph nodes и `run_full_graph_cycle(...)`
+  - sandbox execution
+  - predefined tests
+  - static analysis
+  - llm review + scoring + profile update + branching
+- `libs/common/src/interview_common`
+  - typed settings + `.env` loading
+- `sandbox/{python,go,java,cpp}`
+  - изолированные runtime templates
+- `sandbox/seccomp/sandbox-seccomp.json`
+  - seccomp profile for container hardening
 
-Пользователь выбирает:
-Python
-Go
-Java
-C++
-(расширяемо)
+## 4. Graph Order (Contract)
 
-Сохраняем:
-preferred_language
-interview_language (EN / RU — опционально)
-current_skill_profile
-User Table (updated)
-users:
-- id
-- telegram_id
-- preferred_language
-- skill_profile (JSONB)
-- created_at
+Фактический порядок узлов:
 
-4. Agent Orchestration (LangGraph)
-LangGraph используется как state-machine orchestrator.
+`GenerateTask -> ExecuteSandbox -> RunTests -> StaticAnalysis -> LLMReview -> ScoreAggregation -> UpdateProfile -> BranchingLogic`
 
-4.1 Graph Nodes
-START
-  ↓
-GenerateTask
-  ↓
-WaitForSubmission
-  ↓
-DetectLanguage
-  ↓
-ExecuteInSandbox
-  ↓
-RunTests
-  ↓
-CollectMetrics
-  ↓
-StaticAnalysis
-  ↓
-LLMReview
-  ↓
-ScoreAggregation
-  ↓
-UpdateUserProfile
-  ↓
-END
+`AgentState` валидируется на границах узлов через `validate_agent_state(...)`.
 
-4.2 Agent State (LangGraph State)
-class AgentState(TypedDict):
-    user_id: str
-    task_id: str
-    language: str
-    code: str
-    execution_result: dict
-    test_results: dict
-    metrics: dict
-    static_analysis: dict
-    llm_review: dict
-    final_score: float
+## 5. AgentState Outputs
 
-5. LLM Integration (Cloud API)
-    Requirements
-    API-based inference
-    Structured output enforced (JSON schema)
-    Temperature control (deterministic review)
-    Retry logic
-    Token usage logging
+Ключевые выходы полного цикла:
 
-    5.1 LLM Usage Points
-    LLM используется для:
-    Генерации задач
-    Code review
-    Difficulty adaptation
-    Weakness profiling
-    Hint generation
+- `execution_result`
+- `metrics`
+- `test_results`
+- `static_analysis`
+- `llm_review`
+- `observability_metrics`
+- `score_breakdown`
+- `final_score`
+- `skill_profile`
+- `branching`
+- `recommended_difficulty`
 
-6. Sandbox Design (Updated)
+## 6. Reliability and Rate Limits (EPIC 14/15)
 
-Для каждого языка создаётся Docker template:
+- Bot-side throttling: per-user submission limit via repository counting.
+- Orchestrator-side throttling: per-user LLM limiter (`InMemoryLLMRateLimiter` by default).
+- LLM graceful degradation:
+  - cloud/reviewer failure -> `reviewer = "heuristic_fallback"`
+  - rate limit -> `reviewer = "heuristic_rate_limited"`
+- Sandbox graceful degradation:
+  - `DockerSandboxRunner.execute(...)` returns structured `SandboxExecutionResult` for timeout/crash paths
+  - cleanup is attempted in `finally`
+  - `execute_sandbox_step(...)` recovers from injected executor exceptions and writes deterministic `execution_result`/`metrics`
+- Structured logs are emitted for recovery and completion paths:
+  - `submission.llm_review.*`
+  - `submission.sandbox.*`
+  - `sandbox.execution.*`
+  - `sandbox.cleanup.*`
 
-/sandbox/python
-/sandbox/go
-/sandbox/java
-/sandbox/cpp
+## 7. Sandbox Security Defaults
 
+- `--network none`
+- CPU/RAM/timeout limits
+- `--read-only`
+- `--tmpfs /tmp`
+- `--cap-drop ALL`
+- `no-new-privileges`
+- seccomp profile
+- forced container cleanup
 
-Execution pipeline:
-Code injection into container
-Compile (если нужно)
-Execute with:
-CPU limit
-Memory limit
-Timeout
+## 8. Operational Validation
 
-Collect:
-runtime
-memory
-exit code
-stdout
-stderr
+Рекомендуемые команды:
 
-7. Difficulty & Language Adaptation
-7.1 Language-Based Task Filtering
+```bash
+make test
+make ci
+```
 
-Tasks table updated:
+Точечная проверка reliability:
 
-tasks:
-- id
-- language
-- category
-- difficulty
-- test_cases
+```bash
+PYTHONPATH=libs/common/src:apps/bot/src:services/orchestrator/src \
+.venv/bin/python -m unittest tests.test_graph_nodes tests.test_sandbox_runner tests.test_agent_state -v
+```
 
+## 9. Success Criteria
 
-При выборе языка:
-
-агент генерирует задачи только под выбранный runtime.
-
-7.2 Adaptive Difficulty Logic
-
-LangGraph branching:
-
-if last_3_scores > threshold:
-    increase_difficulty()
-elif repeated_failures:
-    decrease_difficulty()
-
-8. AI Agent Design (Updated)
-
-Теперь система — это:
-    Hybrid Agent System:
-    Tool-based deterministic layer
-    LLM reasoning layer
-    State-driven orchestration
-    Profile-aware adaptation
-
-9. Production Concerns
-    9.1 LLM Layer
-
-    Rate limiting
-    Cost monitoring
-    Fallback model
-    API error handling
-    Circuit breaker
-
-    9.2 Sandbox Layer
-    No network
-    No mounting host FS
-    No privileged mode
-    Hard timeout
-    Auto container cleanup
-
-    9.3 Bot Layer (aiogram)
-    Async handling
-    Rate limiting
-    Idempotent message processing
-    Submission tracking
-    Multi-user isolation
-
-
-10. Updated Success Criteria
-
-    Correct execution isolation
-    <3s average response time
-    Stable structured LLM outputs
-    Language selection working
-    Difficulty adaptation working
-    Cost per submission controlled
+- Полный graph cycle выполняется без unhandled exceptions в recoverable сценариях.
+- LLM review остается структурированным и детерминированным (включая fallback/rate-limit).
+- Sandbox crash/timeout paths возвращают диагностируемый результат и не валят pipeline.
+- Score/profile/branching вычисляются даже при частичных ошибках исполнения или ревью.

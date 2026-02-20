@@ -105,21 +105,21 @@ class DockerSandboxRunner:
             source_size_bytes=len(source_code.encode("utf-8")),
         )
 
-        with tempfile.TemporaryDirectory(prefix=f"sandbox_{language}_") as workspace_dir:
-            source_path = Path(workspace_dir) / source_file_name
-            source_path.write_text(source_code, encoding="utf-8")
+        started_at = time.monotonic()
+        try:
+            with tempfile.TemporaryDirectory(prefix=f"sandbox_{language}_") as workspace_dir:
+                source_path = Path(workspace_dir) / source_file_name
+                source_path.write_text(source_code, encoding="utf-8")
 
-            command = self._build_docker_command(
-                language=language,
-                workspace_dir=workspace_dir,
-                source_file_name=source_file_name,
-                limits=normalized_limits,
-                container_name=container_name,
-                main_class_name=main_class_name,
-            )
+                command = self._build_docker_command(
+                    language=language,
+                    workspace_dir=workspace_dir,
+                    source_file_name=source_file_name,
+                    limits=normalized_limits,
+                    container_name=container_name,
+                    main_class_name=main_class_name,
+                )
 
-            started_at = time.monotonic()
-            try:
                 completed = subprocess.run(
                     command,
                     capture_output=True,
@@ -128,107 +128,103 @@ class DockerSandboxRunner:
                     timeout=normalized_limits.timeout_seconds,
                     check=False,
                 )
-                memory_usage_kb, sanitized_stderr = _extract_memory_usage_kb(completed.stderr)
-                result = SandboxExecutionResult(
-                    language=language,
-                    exit_code=completed.returncode,
-                    stdout=completed.stdout,
-                    stderr=sanitized_stderr,
-                    memory_usage_kb=memory_usage_kb,
-                    timed_out=False,
-                    duration_seconds=time.monotonic() - started_at,
-                    container_name=container_name,
-                )
-                _log_sandbox_event(
-                    logging.INFO,
-                    event="sandbox.execution.completed",
-                    language=language,
-                    container_name=container_name,
-                    exit_code=result.exit_code,
-                    duration_seconds=round(result.duration_seconds, 4),
-                    timed_out=False,
-                    memory_usage_kb=memory_usage_kb,
-                    stderr_excerpt=_truncate_log_message(sanitized_stderr),
-                )
-                return result
-            except subprocess.TimeoutExpired as exc:
-                timeout_message = (
-                    f"Execution timed out after {normalized_limits.timeout_seconds:.2f}s."
-                )
-                raw_stderr = _coerce_stream(exc.stderr)
-                memory_usage_kb, stderr = _extract_memory_usage_kb(raw_stderr)
-                if stderr:
-                    stderr = f"{stderr}\n{timeout_message}"
-                else:
-                    stderr = timeout_message
+            memory_usage_kb, sanitized_stderr = _extract_memory_usage_kb(completed.stderr)
+            result = SandboxExecutionResult(
+                language=language,
+                exit_code=completed.returncode,
+                stdout=completed.stdout,
+                stderr=sanitized_stderr,
+                memory_usage_kb=memory_usage_kb,
+                timed_out=False,
+                duration_seconds=time.monotonic() - started_at,
+                container_name=container_name,
+            )
+            _log_sandbox_event(
+                logging.INFO,
+                event="sandbox.execution.completed",
+                language=language,
+                container_name=container_name,
+                exit_code=result.exit_code,
+                duration_seconds=round(result.duration_seconds, 4),
+                timed_out=False,
+                memory_usage_kb=memory_usage_kb,
+                stderr_excerpt=_truncate_log_message(sanitized_stderr),
+            )
+            return result
+        except subprocess.TimeoutExpired as exc:
+            timeout_message = f"Execution timed out after {normalized_limits.timeout_seconds:.2f}s."
+            raw_stderr = _coerce_stream(exc.stderr)
+            memory_usage_kb, stderr = _extract_memory_usage_kb(raw_stderr)
+            if stderr:
+                stderr = f"{stderr}\n{timeout_message}"
+            else:
+                stderr = timeout_message
 
-                result = SandboxExecutionResult(
-                    language=language,
-                    exit_code=None,
-                    stdout=_coerce_stream(exc.output),
-                    stderr=stderr,
-                    memory_usage_kb=memory_usage_kb,
-                    timed_out=True,
-                    duration_seconds=time.monotonic() - started_at,
-                    container_name=container_name,
-                )
-                _log_sandbox_event(
-                    logging.WARNING,
-                    event="sandbox.execution.timed_out",
-                    language=language,
-                    container_name=container_name,
-                    timeout_seconds=normalized_limits.timeout_seconds,
-                    duration_seconds=round(result.duration_seconds, 4),
-                    memory_usage_kb=memory_usage_kb,
-                    stderr_excerpt=_truncate_log_message(stderr),
-                )
-                return result
-            except FileNotFoundError:
-                result = SandboxExecutionResult(
-                    language=language,
-                    exit_code=None,
-                    stdout="",
-                    stderr="Docker CLI was not found in PATH.",
-                    memory_usage_kb=None,
-                    timed_out=False,
-                    duration_seconds=time.monotonic() - started_at,
-                    container_name=container_name,
-                )
-                _log_sandbox_event(
-                    logging.ERROR,
-                    event="sandbox.execution.crashed",
-                    language=language,
-                    container_name=container_name,
-                    crash_type="docker_cli_missing",
-                    stderr=result.stderr,
-                )
-                return result
-            except (
-                Exception
-            ) as exc:  # noqa: BLE001 - sandbox failures must be reported consistently
-                error_message = f"Sandbox runner crashed: {type(exc).__name__}: {exc}"
-                result = SandboxExecutionResult(
-                    language=language,
-                    exit_code=None,
-                    stdout="",
-                    stderr=error_message,
-                    memory_usage_kb=None,
-                    timed_out=False,
-                    duration_seconds=time.monotonic() - started_at,
-                    container_name=container_name,
-                )
-                _log_sandbox_event(
-                    logging.ERROR,
-                    event="sandbox.execution.crashed",
-                    language=language,
-                    container_name=container_name,
-                    crash_type=type(exc).__name__,
-                    error=str(exc),
-                    exc_info=True,
-                )
-                return result
-            finally:
-                self._cleanup_container(container_name)
+            result = SandboxExecutionResult(
+                language=language,
+                exit_code=None,
+                stdout=_coerce_stream(exc.output),
+                stderr=stderr,
+                memory_usage_kb=memory_usage_kb,
+                timed_out=True,
+                duration_seconds=time.monotonic() - started_at,
+                container_name=container_name,
+            )
+            _log_sandbox_event(
+                logging.WARNING,
+                event="sandbox.execution.timed_out",
+                language=language,
+                container_name=container_name,
+                timeout_seconds=normalized_limits.timeout_seconds,
+                duration_seconds=round(result.duration_seconds, 4),
+                memory_usage_kb=memory_usage_kb,
+                stderr_excerpt=_truncate_log_message(stderr),
+            )
+            return result
+        except FileNotFoundError:
+            result = SandboxExecutionResult(
+                language=language,
+                exit_code=None,
+                stdout="",
+                stderr="Docker CLI was not found in PATH.",
+                memory_usage_kb=None,
+                timed_out=False,
+                duration_seconds=time.monotonic() - started_at,
+                container_name=container_name,
+            )
+            _log_sandbox_event(
+                logging.ERROR,
+                event="sandbox.execution.crashed",
+                language=language,
+                container_name=container_name,
+                crash_type="docker_cli_missing",
+                stderr=result.stderr,
+            )
+            return result
+        except Exception as exc:  # noqa: BLE001 - sandbox failures must be reported consistently
+            error_message = f"Sandbox runner crashed: {type(exc).__name__}: {exc}"
+            result = SandboxExecutionResult(
+                language=language,
+                exit_code=None,
+                stdout="",
+                stderr=error_message,
+                memory_usage_kb=None,
+                timed_out=False,
+                duration_seconds=time.monotonic() - started_at,
+                container_name=container_name,
+            )
+            _log_sandbox_event(
+                logging.ERROR,
+                event="sandbox.execution.crashed",
+                language=language,
+                container_name=container_name,
+                crash_type=type(exc).__name__,
+                error=str(exc),
+                exc_info=True,
+            )
+            return result
+        finally:
+            self._cleanup_container(container_name)
 
     def _build_docker_command(
         self,

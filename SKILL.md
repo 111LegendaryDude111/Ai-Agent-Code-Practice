@@ -44,13 +44,16 @@ description: Implement and maintain the Agentic Interview Coding Assistant monor
 5. Keep numeric score fields clamped to `[0, 100]`.
 6. If `score_template` exists, keep `score == score_template.final_score`.
 7. Keep heuristic fallback deterministic; cloud reviewer failures must degrade gracefully.
-8. Keep LLM rate-limit degradation deterministic (`reviewer = "heuristic_rate_limited"`).
-9. Keep `observability_metrics` computation wired in `llm_review_node`, including fallback/rate-limited branches.
-10. Add/adjust tests in `tests/test_graph_nodes.py` for:
+8. Keep reviewer exception fallback deterministic inside `llm_review_node`
+   (`reviewer = "heuristic_fallback"` and optional `llm_error`).
+9. Keep LLM rate-limit degradation deterministic (`reviewer = "heuristic_rate_limited"`).
+10. Keep `observability_metrics` computation wired in `llm_review_node`, including fallback/rate-limited branches.
+11. Add/adjust tests in `tests/test_graph_nodes.py` for:
    - retry-to-success cloud review behavior
    - malformed payload normalization
    - `score_template.final_score` precedence
    - LLM rate-limit behavior
+   - reviewer exception fallback behavior
 
 ## Implement Reliability/Rate-Limit Tasks (EPIC 14/15)
 
@@ -60,8 +63,11 @@ description: Implement and maintain the Agentic Interview Coding Assistant monor
 4. Preserve sandbox crash recovery in `DockerSandboxRunner.execute(...)`:
    - return structured `SandboxExecutionResult` on crash/timeout
    - always attempt container cleanup in `finally`
-5. Keep structured logs for crash/fallback/rate-limit events.
-6. Add/adjust tests in:
+5. Preserve state-step recovery in `execute_sandbox_step(...)` when injected executor raises:
+   - write deterministic `execution_result`/`metrics`
+   - continue graph flow without unhandled exception
+6. Keep structured logs for crash/fallback/rate-limit events.
+7. Add/adjust tests in:
    - `tests/test_graph_nodes.py`
    - `tests/test_user_repository.py`
    - `tests/test_sandbox_runner.py`

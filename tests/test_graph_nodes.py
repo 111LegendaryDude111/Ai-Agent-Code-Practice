@@ -187,6 +187,25 @@ class CountingLLMReviewer:
         }
 
 
+class FailingLLMReviewer:
+    def review(self, state: AgentState) -> dict[str, object]:
+        _ = state
+        raise RuntimeError("simulated llm outage")
+
+
+class FailingSandboxExecutor:
+    def execute(
+        self,
+        language: str,
+        source_code: str,
+        limits: object | None = None,
+        main_class_name: str = "Main",
+        stdin_data: str = "",
+    ) -> SandboxExecutionResult:
+        _ = (language, source_code, limits, main_class_name, stdin_data)
+        raise RuntimeError("simulated sandbox crash")
+
+
 class MalformedFallbackLLMReviewer:
     def review(self, state: AgentState) -> dict[str, object]:
         return {
@@ -538,6 +557,25 @@ class GraphNodesTests(unittest.TestCase):
         self.assertEqual(llm_review["score"], 82.5)
         score_template = cast(dict[str, object], llm_review["score_template"])
         self.assertEqual(score_template["final_score"], 82.5)
+
+    def test_llm_review_node_falls_back_when_reviewer_raises(self) -> None:
+        updated_state = llm_review_node(
+            state={
+                "user_id": "42",
+                "task_id": "task-llm-failure",
+                "language": "python",
+                "code": "print('ok')",
+            },
+            llm_reviewer=FailingLLMReviewer(),
+            llm_rate_limiter=InMemoryLLMRateLimiter(max_calls=5, window_seconds=120),
+        )
+
+        review = cast(dict[str, object], updated_state["llm_review"])
+        self.assertEqual(review["reviewer"], "heuristic_fallback")
+        self.assertIn("llm_error", review)
+        issues = cast(list[str], review["issues"])
+        self.assertTrue(any("fallback" in issue.lower() for issue in issues))
+        self.assertIn("observability_metrics", updated_state)
 
     def test_llm_review_node_blocks_second_call_when_rate_limit_is_exceeded(self) -> None:
         reviewer = CountingLLMReviewer()
@@ -963,6 +1001,29 @@ class GraphNodesTests(unittest.TestCase):
         self.assertIn("avg_runtime_ms", completed_payload)
         self.assertIn("fail_rate", completed_payload)
         self.assertIn("cost_per_submission", completed_payload)
+
+    def test_run_full_graph_cycle_recovers_from_partial_failures(self) -> None:
+        final_state = run_full_graph_cycle(
+            state={
+                "user_id": "42",
+                "task_id": "task-partial-failures",
+                "language": "python",
+                "code": "print(sum(map(int, input().split())))",
+            },
+            task_generator=StubTaskGenerator(),
+            sandbox_executor=FailingSandboxExecutor(),
+            test_runner=StubTestRunner(),
+            static_analyzer=StubStaticAnalyzer(),
+            llm_reviewer=FailingLLMReviewer(),
+            llm_rate_limiter=InMemoryLLMRateLimiter(max_calls=10, window_seconds=120),
+        )
+
+        execution_result = cast(dict[str, object], final_state["execution_result"])
+        self.assertIsNone(execution_result["exit_code"])
+        self.assertIn("Sandbox execution failed", str(execution_result["stderr"]))
+        llm_review = cast(dict[str, object], final_state["llm_review"])
+        self.assertEqual(llm_review["reviewer"], "heuristic_fallback")
+        self.assertIn("final_score", final_state)
 
 
 if __name__ == "__main__":

@@ -43,12 +43,14 @@ Goal: implement features quickly without breaking the bot/orchestrator pipeline.
    - `score_template: {correctness, performance, readability, security, final_score}`
    - `score: float`
    - `reviewer: str`
+   - `llm_error: str` (optional, fallback path only)
 3. Keep score bounds in `[0, 100]` for `score` and every numeric field in `score_template`.
 4. If `score_template` is present in reviewer payload, `score` must match `score_template.final_score`.
 5. Do not bypass `_normalize_llm_review_payload(...)` when writing `state["llm_review"]`.
 6. Keep prompt shape aligned with deterministic templates in `LangChainCloudLLMReviewer`.
 7. Preserve graceful degradation:
    - cloud failure path -> `reviewer = "heuristic_fallback"`
+   - reviewer exception path in `llm_review_node` -> `reviewer = "heuristic_fallback"` and `llm_error`
    - LLM rate-limit path -> `reviewer = "heuristic_rate_limited"`
 8. Keep `observability_metrics` computed in `llm_review_node` (including fallback/rate-limited paths).
 
@@ -58,8 +60,10 @@ Goal: implement features quickly without breaking the bot/orchestrator pipeline.
 2. Keep LLM call throttling in orchestrator via rate limiter abstraction (default in-memory limiter).
 3. Keep sandbox crash recovery behavior in `DockerSandboxRunner.execute(...)`:
    return `SandboxExecutionResult` with diagnostics and always attempt cleanup in `finally`.
-4. Do not turn recoverable execution/review errors into unhandled exceptions in `run_full_graph_cycle(...)`.
-5. Preserve structured logging for failure/recovery paths (`submission.llm_review.*`, `sandbox.execution.*`).
+4. Keep `execute_sandbox_step(...)` resilient to injected executor failures:
+   write deterministic `execution_result`/`metrics` and continue graph execution.
+5. Do not turn recoverable execution/review errors into unhandled exceptions in `run_full_graph_cycle(...)`.
+6. Preserve structured logging for failure/recovery paths (`submission.llm_review.*`, `sandbox.execution.*`).
 
 ## Working Rules
 
@@ -103,3 +107,7 @@ Goal: implement features quickly without breaking the bot/orchestrator pipeline.
 4. `tests/test_graph_nodes.py` passes, including fallback and rate-limit scenarios when touched behavior affects them.
 5. Related contract tests (`tests/test_agent_state.py`, `tests/test_submission_validation.py`, `tests/test_user_repository.py`) pass when touched behavior affects them.
 6. If sandbox behavior is touched, `tests/test_sandbox_runner.py` and `tests/test_sandbox_templates.py` pass.
+7. Reliability-specific cases stay covered:
+   - `test_llm_review_node_falls_back_when_reviewer_raises`
+   - `test_run_full_graph_cycle_recovers_from_partial_failures`
+   - `test_execute_recovers_when_command_building_crashes`
