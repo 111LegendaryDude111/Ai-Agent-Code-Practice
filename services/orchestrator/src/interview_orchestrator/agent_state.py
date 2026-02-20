@@ -22,6 +22,12 @@ class MetricsState(TypedDict):
     timed_out: bool
 
 
+class ObservabilityMetricsState(TypedDict):
+    avg_runtime_ms: float
+    fail_rate: float
+    cost_per_submission: float
+
+
 class TestResultsState(TypedDict):
     total: int
     passed: int
@@ -83,6 +89,7 @@ class AgentState(TypedDict):
     execution_result: NotRequired[ExecutionResultState]
     test_results: NotRequired[TestResultsState]
     metrics: NotRequired[MetricsState]
+    observability_metrics: NotRequired[ObservabilityMetricsState]
     static_analysis: NotRequired[StaticAnalysisState]
     llm_review: NotRequired[dict[str, object]]
     score_breakdown: NotRequired[dict[str, object]]
@@ -133,6 +140,8 @@ def validate_agent_state(state: Mapping[str, object]) -> AgentState:
         _validate_execution_result_state(normalized_state["execution_result"])
     if "metrics" in normalized_state:
         _validate_metrics_state(normalized_state["metrics"])
+    if "observability_metrics" in normalized_state:
+        _validate_observability_metrics_state(normalized_state["observability_metrics"])
     if "test_results" in normalized_state:
         _validate_test_results_state(normalized_state["test_results"])
     if "static_analysis" in normalized_state:
@@ -197,6 +206,44 @@ def _validate_metrics_state(value: object) -> None:
     _validate_required_field(value, "stdout", str, "state.metrics.stdout")
     _validate_required_field(value, "stderr", str, "state.metrics.stderr")
     _validate_required_field(value, "timed_out", bool, "state.metrics.timed_out")
+
+
+def _validate_observability_metrics_state(value: object) -> None:
+    if not isinstance(value, dict):
+        raise AgentStateValidationError("state.observability_metrics must be an object.")
+
+    avg_runtime_ms_raw = value.get("avg_runtime_ms")
+    fail_rate_raw = value.get("fail_rate")
+    cost_per_submission_raw = value.get("cost_per_submission")
+
+    if isinstance(avg_runtime_ms_raw, bool) or not isinstance(avg_runtime_ms_raw, int | float):
+        raise AgentStateValidationError(
+            "state.observability_metrics.avg_runtime_ms must be number."
+        )
+    if isinstance(fail_rate_raw, bool) or not isinstance(fail_rate_raw, int | float):
+        raise AgentStateValidationError("state.observability_metrics.fail_rate must be number.")
+    if isinstance(cost_per_submission_raw, bool) or not isinstance(
+        cost_per_submission_raw,
+        int | float,
+    ):
+        raise AgentStateValidationError(
+            "state.observability_metrics.cost_per_submission must be number."
+        )
+
+    avg_runtime_ms = float(avg_runtime_ms_raw)
+    fail_rate = float(fail_rate_raw)
+    cost_per_submission = float(cost_per_submission_raw)
+
+    if avg_runtime_ms < 0.0:
+        raise AgentStateValidationError("state.observability_metrics.avg_runtime_ms must be >= 0.")
+    if not 0.0 <= fail_rate <= 1.0:
+        raise AgentStateValidationError(
+            "state.observability_metrics.fail_rate must be in range [0, 1]."
+        )
+    if cost_per_submission < 0.0:
+        raise AgentStateValidationError(
+            "state.observability_metrics.cost_per_submission must be >= 0."
+        )
 
 
 def _validate_test_results_state(value: object) -> None:

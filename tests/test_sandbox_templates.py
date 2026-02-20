@@ -15,6 +15,9 @@ class SandboxTemplatesTests(unittest.TestCase):
             self.assertTrue(dockerfile.exists(), f"Missing Dockerfile for {language}")
             self.assertTrue(run_script.exists(), f"Missing run.sh for {language}")
 
+        seccomp_profile = project_root / "sandbox" / "seccomp" / "sandbox-seccomp.json"
+        self.assertTrue(seccomp_profile.exists(), "Missing seccomp profile for sandbox runner.")
+
     def test_dockerfiles_use_non_root_user_and_entrypoint(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
         expected_languages = ("python", "go", "java", "cpp")
@@ -44,6 +47,15 @@ class SandboxTemplatesTests(unittest.TestCase):
             self.assertIn("set -eu", run_script)
             self.assertIn(expected_path, run_script)
             self.assertIn("__METRIC_MAX_RSS_KB__:%M", run_script)
+
+    def test_sandbox_readme_documents_hardening_flags(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        readme_text = (project_root / "sandbox" / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("--read-only", readme_text)
+        self.assertIn("--ulimit nproc=", readme_text)
+        self.assertIn("--security-opt no-new-privileges", readme_text)
+        self.assertIn("--security-opt seccomp=", readme_text)
 
 
 if __name__ == "__main__":

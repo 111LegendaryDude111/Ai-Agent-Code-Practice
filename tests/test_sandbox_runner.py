@@ -25,6 +25,7 @@ class DockerSandboxRunnerTests(unittest.TestCase):
             memory_limit_mb=128,
             timeout_seconds=2.0,
             pids_limit=32,
+            nproc_limit=32,
             tmpfs_size_mb=32,
         )
 
@@ -47,6 +48,18 @@ class DockerSandboxRunnerTests(unittest.TestCase):
         self.assertEqual(command[command.index("--memory") + 1], "128m")
         self.assertIn("--pids-limit", command)
         self.assertEqual(command[command.index("--pids-limit") + 1], "32")
+        self.assertIn("--ulimit", command)
+        self.assertEqual(command[command.index("--ulimit") + 1], "nproc=32:32")
+        security_opts = [
+            command[index + 1]
+            for index, value in enumerate(command[:-1])
+            if value == "--security-opt"
+        ]
+        self.assertIn("no-new-privileges", security_opts)
+        seccomp_opt = next(option for option in security_opts if option.startswith("seccomp="))
+        seccomp_path = Path(seccomp_opt.removeprefix("seccomp="))
+        self.assertTrue(seccomp_path.exists())
+        self.assertEqual(seccomp_path.name, "sandbox-seccomp.json")
         self.assertIn("--read-only", command)
         self.assertIn("--tmpfs", command)
         self.assertIn("--cap-drop", command)
@@ -220,6 +233,26 @@ class DockerSandboxRunnerTests(unittest.TestCase):
                 language="python",
                 source_code="print('ok')",
                 limits=SandboxLimits(cpu_limit=0),
+            )
+
+        with self.assertRaises(ValueError):
+            runner.execute(
+                language="python",
+                source_code="print('ok')",
+                limits=SandboxLimits(nproc_limit=0),
+            )
+
+    def test_build_docker_command_rejects_missing_seccomp_profile(self) -> None:
+        runner = DockerSandboxRunner(seccomp_profile_path="/tmp/does-not-exist-seccomp.json")
+
+        with self.assertRaises(ValueError):
+            runner._build_docker_command(
+                language="python",
+                workspace_dir="/tmp/sandbox-work",
+                source_file_name="main.py",
+                limits=SandboxLimits(),
+                container_name="sandbox-test",
+                main_class_name="Main",
             )
 
 

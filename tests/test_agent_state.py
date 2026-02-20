@@ -196,6 +196,42 @@ class AgentStateTests(unittest.TestCase):
                 }
             )
 
+    def test_validate_agent_state_accepts_observability_metrics(self) -> None:
+        state = validate_agent_state(
+            {
+                "user_id": "42",
+                "task_id": "task-1",
+                "language": "python",
+                "code": "print('ok')",
+                "observability_metrics": {
+                    "avg_runtime_ms": 35.5,
+                    "fail_rate": 0.25,
+                    "cost_per_submission": 0.000031,
+                },
+            }
+        )
+        self.assertIn("observability_metrics", state)
+        metrics = state["observability_metrics"]
+        self.assertEqual(metrics["avg_runtime_ms"], 35.5)
+        self.assertEqual(metrics["fail_rate"], 0.25)
+        self.assertEqual(metrics["cost_per_submission"], 0.000031)
+
+    def test_validate_agent_state_rejects_invalid_observability_fail_rate(self) -> None:
+        with self.assertRaises(AgentStateValidationError):
+            validate_agent_state(
+                {
+                    "user_id": "42",
+                    "task_id": "task-1",
+                    "language": "python",
+                    "code": "print('ok')",
+                    "observability_metrics": {
+                        "avg_runtime_ms": 10.0,
+                        "fail_rate": 1.2,
+                        "cost_per_submission": 0.0,
+                    },
+                }
+            )
+
     def test_validate_agent_state_accepts_branching_payload(self) -> None:
         state = validate_agent_state(
             {

@@ -12,6 +12,9 @@ from uuid import uuid4
 
 MEMORY_USAGE_MARKER_PREFIX = "__METRIC_MAX_RSS_KB__:"
 _SANDBOX_LOGGER = logging.getLogger("interview_orchestrator.sandbox")
+_DEFAULT_SECCOMP_PROFILE_PATH = (
+    Path(__file__).resolve().parents[4] / "sandbox" / "seccomp" / "sandbox-seccomp.json"
+)
 
 
 DEFAULT_IMAGE_BY_LANGUAGE: dict[str, str] = {
@@ -35,6 +38,7 @@ class SandboxLimits:
     memory_limit_mb: int = 256
     timeout_seconds: float = 3.0
     pids_limit: int = 64
+    nproc_limit: int = 64
     tmpfs_size_mb: int = 64
 
 
@@ -55,11 +59,18 @@ class DockerSandboxRunner:
         self,
         image_by_language: Mapping[str, str] | None = None,
         docker_binary: str = "docker",
+        seccomp_profile_path: str | None = None,
     ) -> None:
         self._docker_binary = docker_binary
         self._image_by_language = dict(DEFAULT_IMAGE_BY_LANGUAGE)
         if image_by_language is not None:
             self._image_by_language.update(image_by_language)
+        profile_path = (
+            Path(seccomp_profile_path).expanduser()
+            if seccomp_profile_path is not None
+            else _DEFAULT_SECCOMP_PROFILE_PATH
+        )
+        self._seccomp_profile_path = profile_path.resolve()
 
     def execute(
         self,
@@ -89,6 +100,8 @@ class DockerSandboxRunner:
             memory_limit_mb=normalized_limits.memory_limit_mb,
             timeout_seconds=normalized_limits.timeout_seconds,
             pids_limit=normalized_limits.pids_limit,
+            nproc_limit=normalized_limits.nproc_limit,
+            seccomp_profile=str(self._seccomp_profile_path),
             source_size_bytes=len(source_code.encode("utf-8")),
         )
 
@@ -231,6 +244,11 @@ class DockerSandboxRunner:
             raise ValueError(f"Container image is not configured for language '{language}'.")
 
         mount = f"{Path(workspace_dir).resolve()}:/workspace:ro"
+        if not self._seccomp_profile_path.exists():
+            raise ValueError(
+                f"Seccomp profile not found at {self._seccomp_profile_path}. "
+                "Use an existing profile file."
+            )
         command: list[str] = [
             self._docker_binary,
             "run",
@@ -245,6 +263,12 @@ class DockerSandboxRunner:
             f"{limits.memory_limit_mb}m",
             "--pids-limit",
             str(limits.pids_limit),
+            "--ulimit",
+            f"nproc={limits.nproc_limit}:{limits.nproc_limit}",
+            "--security-opt",
+            "no-new-privileges",
+            "--security-opt",
+            f"seccomp={self._seccomp_profile_path}",
             "--read-only",
             "--tmpfs",
             f"/tmp:rw,noexec,nosuid,size={limits.tmpfs_size_mb}m",
@@ -358,5 +382,7 @@ def _validate_limits(limits: SandboxLimits) -> None:
         raise ValueError("timeout_seconds must be > 0.")
     if limits.pids_limit <= 0:
         raise ValueError("pids_limit must be > 0.")
+    if limits.nproc_limit <= 0:
+        raise ValueError("nproc_limit must be > 0.")
     if limits.tmpfs_size_mb <= 0:
         raise ValueError("tmpfs_size_mb must be > 0.")

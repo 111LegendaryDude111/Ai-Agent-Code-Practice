@@ -30,6 +30,9 @@ docker run --rm \
   --cpus 1 \
   --memory 256m \
   --pids-limit 64 \
+  --ulimit nproc=64:64 \
+  --security-opt no-new-privileges \
+  --security-opt seccomp="$(pwd)/sandbox/seccomp/sandbox-seccomp.json" \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   -v "$PWD:/workspace:ro" \
